@@ -37,6 +37,9 @@ Scene size includes all states, events, transitions, and settings. It does not g
 
 ## Audio behavior
 
+- In **Media → Track library**, choose **Trim audio** beside a track. Drag the IN/OUT handles or enter the beginning offset and end in seconds, audition with **Preview selection**, then choose **Apply trim**. Scene playback and its waveform use that section; looping repeats only that section. **Full track** restores the whole file. Save the project to retain the selection.
+- **Save trimmed MP3…** writes the current editor selection as a separate MP3. The source file stays unchanged. **Export files for MP3 cards** also renders each applied trim into its numbered MP3; re-export and copy `/01` to every player's card after changing a trim. No firmware update is needed for trimming. Trimmed exports are re-encoded at 192 kbps stereo/44.1 kHz; untrimmed card exports keep their original bytes. MP3 hardware can introduce small decoder padding/delays.
+- Crossfade duration is under **Media → Ambient & transitions → Audio transition: Crossfade → Crossfade (ms)**. It is independent of the track's trim range.
 - One player supports hard cuts or **Fade out / fade in** transitions. In Media, choose the transition and set separate fade-out and fade-in times (250 ms defaults, 50 ms steps, 0–12,750 ms each). The old track fades to silence before the new track starts and fades in. Module loading and command pacing add a short gap; this is not an overlapping crossfade.
 - Two players support ordinary crossfades, or uninterrupted ambient position plus one foreground track at a time.
 - Three players support uninterrupted ambient position while crossfading between different foreground tracks.
@@ -90,6 +93,8 @@ npm run package:portable
 ```
 
 On macOS/Linux use `.tools/pio/bin/python` and `.tools/pio/bin/platformio`. Build the application and prepare resources on the target operating system so the uploader and native serial module match it. Packaging targets for macOS/Linux are configured; their installers and physical USB behavior have not been tested on this Windows machine.
+
+The desktop build also copies the platform's FFmpeg executable from the pinned `ffmpeg-static` dependency into `resources/ffmpeg`. The packaged app uses that encoder offline to save trimmed MP3s. The distributor's license and build/source information are copied alongside it; see [ffmpeg-static's binary sources](https://github.com/eugeneware/ffmpeg-static#sources-of-the-binaries). Reinstall dependencies on each target OS/architecture before packaging.
 
 Verification:
 

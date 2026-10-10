@@ -876,6 +876,133 @@ a {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.track-trim-summary {
+  color: var(--accent);
+  font-size: 10px;
+  margin-top: 5px;
+}
+.audio-trim-editor {
+  padding: 18px;
+  background: #111a22;
+  border: 1px solid #415a50;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.audio-trim-editor h3 {
+  margin-bottom: 5px;
+}
+.trim-waveform {
+  position: relative;
+  height: 130px;
+  margin: 7px 7px 0;
+  background: #152620;
+  border-radius: 4px;
+  color: #9cd5b9;
+  touch-action: none;
+}
+.trim-waveform > svg {
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.trim-waveform-placeholder {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: 18px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+.trim-excluded {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: #080d12bb;
+  pointer-events: none;
+}
+.trim-selection {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-top: 1px solid #a7dabe;
+  border-bottom: 1px solid #a7dabe;
+  background: #a4ec8612;
+  pointer-events: none;
+}
+.trim-handle {
+  position: absolute;
+  top: -5px;
+  bottom: -5px;
+  width: 14px;
+  margin-left: -7px;
+  background: #b8e698;
+  border: 2px solid #142318;
+  border-radius: 4px;
+  cursor: ew-resize;
+  z-index: 2;
+  touch-action: none;
+}
+.trim-handle::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 43%;
+  height: 18px;
+  border-left: 1px solid #476534;
+  border-right: 1px solid #476534;
+  width: 3px;
+}
+.trim-handle:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+.trim-handle > span {
+  position: absolute;
+  top: 8px;
+  left: 16px;
+  padding: 2px 4px;
+  background: #132317dd;
+  color: #ccedb9;
+  font-size: 9px;
+  border-radius: 2px;
+  pointer-events: none;
+}
+.trim-handle.end > span {
+  left: auto;
+  right: 16px;
+}
+.trim-ruler {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 10px;
+  padding: 0 7px;
+  margin-top: -4px;
+}
+.trim-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.trim-controls label {
+  flex: 1;
+  min-width: 150px;
+}
+.trim-length {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-width: 140px;
+  padding-bottom: 8px;
+}
+.trim-length strong {
+  color: var(--accent);
+  font-size: 15px;
+}
 .validation-box {
   background: #302627;
   border: 1px solid #655044;

@@ -34,6 +34,11 @@ export interface MediaTrack {
   number: number;
   name: string;
   path?: string;
+  /** Source duration for editing; exports verify the actual audio file. */
+  durationMs?: number;
+  /** Non-destructive source range. Omitted/null end means end of file. */
+  trimStartMs?: number;
+  trimEndMs?: number | null;
 }
 export interface TimelineEvent {
   id: string;

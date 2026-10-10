@@ -1,4 +1,5 @@
 import { build } from "esbuild";
+await import("./prepare-audio-resources.mjs");
 await build({
   entryPoints: ["src/main/main.ts"],
   outfile: "dist-electron/main.cjs",

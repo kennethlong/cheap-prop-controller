@@ -10,10 +10,19 @@ import { pathToFileURL } from "node:url";
 import { SerialService } from "./serial-service";
 import { ProjectStore } from "./project-store";
 import { flashFirmware } from "./firmware";
-import type { BoardId } from "../shared/model";
+import type { BoardId, MediaTrack } from "../shared/model";
 
 const serial = new SerialService();
-const projects = new ProjectStore();
+const toolsRoot = app.isPackaged
+  ? path.join(process.resourcesPath, "tools")
+  : path.join(app.getAppPath(), "resources");
+const projects = new ProjectStore({
+  ffmpegPath: path.join(
+    toolsRoot,
+    "ffmpeg",
+    process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg",
+  ),
+});
 let window: BrowserWindow | undefined;
 let flashing = false;
 const devURL = !app.isPackaged ? process.env.CPC_DEV_URL : undefined;
@@ -112,6 +121,26 @@ handle("media:import", async (number: number) => {
   return { number, name: path.basename(filename), path: filename };
 });
 handle("media:read", (filename: string) => projects.readAudio(filename));
+handle("media:save-trimmed", async (track: MediaTrack) => {
+  if (!track || typeof track.path !== "string")
+    throw new Error("Choose an audio file before saving a clip");
+  const source = path.isAbsolute(track.path)
+    ? track.path
+    : path.resolve(
+        projects.currentPath
+          ? path.dirname(projects.currentPath)
+          : app.getPath("documents"),
+        track.path,
+      );
+  const sourceName = path.parse(source).name;
+  const result = await dialog.showSaveDialog(window!, {
+    title: "Save trimmed MP3",
+    defaultPath: path.join(path.dirname(source), `${sourceName}-trimmed.mp3`),
+    filters: [{ name: "MP3 audio", extensions: ["mp3"] }],
+  });
+  if (result.canceled || !result.filePath) return null;
+  return projects.saveTrimmedAudio(track, result.filePath);
+});
 handle("media:export", async (project: unknown) => {
   const result = await dialog.showOpenDialog(window!, {
     title: "Choose MP3 card or export folder (writes numbered files in 01)",

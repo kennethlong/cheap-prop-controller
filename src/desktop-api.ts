@@ -34,6 +34,7 @@ export interface DesktopAPI {
   ): Promise<ProjectFile | null>;
   importAudio(trackNumber: number): Promise<MediaTrack | null>;
   readAudio(path: string): Promise<{ dataUrl: string }>;
+  saveTrimmedAudio(track: MediaTrack): Promise<{ path: string } | null>;
   exportMedia(
     project: SceneProject,
   ): Promise<{ directory: string; files: number } | null>;

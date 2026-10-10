@@ -13,6 +13,7 @@ const api: DesktopAPI = {
     ipcRenderer.invoke("project:save", project, saveAs),
   importAudio: (number) => ipcRenderer.invoke("media:import", number),
   readAudio: (path) => ipcRenderer.invoke("media:read", path),
+  saveTrimmedAudio: (track) => ipcRenderer.invoke("media:save-trimmed", track),
   exportMedia: (project) => ipcRenderer.invoke("media:export", project),
   onDeviceLog: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, line: string) =>

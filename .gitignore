@@ -5,6 +5,7 @@ release/
 .pio/
 .tools/
 resources/avrdude/
+resources/ffmpeg/
 resources/firmware/*.hex
 test-results/
 playwright-report/

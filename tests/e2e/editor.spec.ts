@@ -217,3 +217,139 @@ test("fade-through settings persist and reserve one player unless ambient contin
   await expect(page.getByLabel("Fade-in milliseconds")).toHaveValue("450");
   await expect(playerCount).toHaveText("1");
 });
+
+test("media trim editor previews a selection, validates bounds, and persists it without replacing the source", async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  // A small generated WAV exercises the actual browser decoder without
+  // depending on a copyrighted recording or an external conversion tool.
+  const sampleRate = 8000;
+  const samples = sampleRate * 8;
+  const wav = Buffer.alloc(44 + samples * 2);
+  wav.write("RIFF", 0);
+  wav.writeUInt32LE(wav.length - 8, 4);
+  wav.write("WAVEfmt ", 8);
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(sampleRate, 24);
+  wav.writeUInt32LE(sampleRate * 2, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write("data", 36);
+  wav.writeUInt32LE(samples * 2, 40);
+  for (let i = 0; i < samples; i++) {
+    wav.writeInt16LE(Math.round(Math.sin(i * 0.12) * 1800), 44 + i * 2);
+  }
+  await page.goto("/");
+  await page
+    .getByRole("navigation", { name: "Workspace" })
+    .getByRole("button", { name: "Media", exact: true })
+    .click();
+  await page.getByTestId("audio-file-input").setInputFiles({
+    name: "trim-fixture.wav",
+    mimeType: "audio/wav",
+    buffer: wav,
+  });
+  await expect(page.getByText("Preview ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Trim audio for track 1" }).click();
+  const editor = page.getByRole("region", {
+    name: "Audio editor for trim-fixture.wav",
+  });
+  await expect(editor.getByLabel("Trim end seconds")).toHaveValue("8.000");
+  await expect(editor.locator(".trim-waveform svg path")).toBeVisible();
+  await expect(editor.getByTestId("trim-duration")).toHaveText("8.000 s");
+
+  await editor.getByTestId("trim-waveform-1").scrollIntoViewIfNeeded();
+  const waveform = await editor.getByTestId("trim-waveform-1").boundingBox();
+  const handle = await editor
+    .getByRole("slider", { name: "Trim start handle" })
+    .boundingBox();
+  await page.mouse.move(handle!.x + handle!.width / 2, handle!.y + 60);
+  await page.mouse.down();
+  await page.mouse.move(waveform!.x + waveform!.width / 4, waveform!.y + 60, {
+    steps: 6,
+  });
+  await page.mouse.up();
+  expect(
+    Number(await editor.getByLabel("Trim start seconds").inputValue()),
+  ).toBeCloseTo(2, 1);
+  await editor.getByLabel("Trim start seconds").fill("2.125");
+  await editor.getByLabel("Trim end seconds").fill("3.250");
+  await editor
+    .getByRole("slider", { name: "Trim start handle" })
+    .press("ArrowLeft");
+  await expect(editor.getByLabel("Trim start seconds")).toHaveValue("2.115");
+  await expect(editor.getByTestId("trim-duration")).toHaveText("1.135 s");
+  await editor
+    .getByRole("button", { name: "Preview selection", exact: true })
+    .click();
+  await editor
+    .getByRole("button", { name: "Stop selection", exact: true })
+    .click();
+  await editor.getByRole("button", { name: "Apply trim", exact: true }).click();
+  await expect(
+    page.getByText("Trim: 2.115 s → 3.250 s", { exact: true }),
+  ).toBeVisible();
+
+  await editor.getByLabel("Trim end seconds").fill("8.001");
+  await expect(editor.getByRole("alert")).toContainText(
+    "no later than 8.000 seconds",
+  );
+  await expect(
+    editor.getByRole("button", { name: "Apply trim", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    editor.getByRole("button", { name: "Preview selection", exact: true }),
+  ).toBeDisabled();
+  await editor.getByLabel("Trim start seconds").fill("");
+  await expect(
+    editor.getByRole("button", { name: "Apply trim", exact: true }),
+  ).toBeDisabled();
+  await editor.getByLabel("Trim start seconds").fill("2.115");
+  await editor.getByLabel("Trim end seconds").fill("3.250");
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save project", exact: true }).click();
+  const download = await downloadPromise;
+  const saved = JSON.parse(await readFile((await download.path())!, "utf8"));
+  expect(saved.audio.tracks[0]).toMatchObject({
+    number: 1,
+    name: "trim-fixture.wav",
+    durationMs: 8000,
+    trimStartMs: 2115,
+    trimEndMs: 3250,
+  });
+  await page.screenshot({
+    path: "artifacts/media-trim-editor.png",
+    fullPage: true,
+  });
+  await editor.getByRole("button", { name: "Full track", exact: true }).click();
+  await expect(editor.getByLabel("Trim start seconds")).toHaveValue("0.000");
+  await expect(editor.getByLabel("Trim end seconds")).toHaveValue("8.000");
+  await expect(page.locator(".track-trim-summary")).toHaveCount(0);
+
+  await page.locator('input[type=file][accept=".json,.cpc"]').setInputFiles({
+    name: "saved-trim.cpc.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(saved)),
+  });
+  await page
+    .getByRole("navigation", { name: "Workspace" })
+    .getByRole("button", { name: "Media", exact: true })
+    .click();
+  const trimToggle = page.getByRole("button", {
+    name: "Trim audio for track 1",
+  });
+  if ((await trimToggle.getAttribute("aria-expanded")) !== "true") {
+    await trimToggle.click();
+  }
+  await expect(editor.getByLabel("Trim start seconds")).toHaveValue("2.115");
+  await expect(editor.getByLabel("Trim end seconds")).toHaveValue("3.250");
+  await expect(
+    editor.getByRole("button", { name: "Preview selection", exact: true }),
+  ).toBeDisabled();
+  expect(errors).toEqual([]);
+});

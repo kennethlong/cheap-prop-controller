@@ -1,6 +1,7 @@
 import { cp, mkdir, access, copyFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+await import("./prepare-audio-resources.mjs");
 const root = process.cwd();
 const profiles = {
   uno: "uno",
@@ -47,4 +48,4 @@ try {
     path.join(destination, "avrdude.conf"),
   );
 }
-console.log("Firmware and platform-specific uploader prepared in resources/.");
+console.log("Firmware, uploader, and audio encoder prepared in resources/.");

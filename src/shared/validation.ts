@@ -117,6 +117,12 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
       number(track.number, `${path}.number`);
       text(track.name, `${path}.name`);
       text(track.path, `${path}.path`, true);
+      if (track.durationMs !== undefined)
+        number(track.durationMs, `${path}.durationMs`);
+      if (track.trimStartMs !== undefined)
+        number(track.trimStartMs, `${path}.trimStartMs`);
+      if (track.trimEndMs !== undefined)
+        number(track.trimEndMs, `${path}.trimEndMs`, true);
     });
   }
   const stateEntries = array(project.states, "states", 64);
@@ -309,11 +315,32 @@ export function validateProject(value: unknown): ValidationIssue[] {
     );
   const tracks = new Set<number>();
   project.audio.tracks.forEach((track, index) => {
+    const path = `audio.tracks.${index}`;
     integer(track.number, 1, LIMITS.maxTrack, `audio.tracks.${index}.number`);
     nonempty(track.name, `audio.tracks.${index}.name`);
     if (tracks.has(track.number))
       fail(`audio.tracks.${index}.number`, "Track numbers must be unique.");
     tracks.add(track.number);
+    const start = track.trimStartMs ?? 0;
+    if (start < 0) fail(`${path}.trimStartMs`, "Start must be zero or later.");
+    if (track.durationMs !== undefined) {
+      if (track.durationMs <= 0)
+        fail(
+          `${path}.durationMs`,
+          "Source duration must be greater than zero.",
+        );
+      if (start >= track.durationMs)
+        fail(
+          `${path}.trimStartMs`,
+          "Start must be before the end of the audio.",
+        );
+    }
+    if (track.trimEndMs !== undefined && track.trimEndMs !== null) {
+      if (track.trimEndMs <= start)
+        fail(`${path}.trimEndMs`, "End must be after start.");
+      if (track.durationMs !== undefined && track.trimEndMs > track.durationMs)
+        fail(`${path}.trimEndMs`, "End must be within the source audio.");
+    }
   });
   const trackReference = (track: number | null, path: string) => {
     if (track === null) return;

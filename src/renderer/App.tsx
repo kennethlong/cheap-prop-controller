@@ -26,6 +26,7 @@ import {
   createDefaultProject,
   createSimulator,
   createState,
+  getMediaClip,
   LIMITS,
   parseProject,
   synchronizeAudioPlayers,
@@ -68,13 +69,22 @@ export function App() {
   const [started, setStarted] = useState(false);
   const [position, setPosition] = useState(0);
   const [waveforms, setWaveforms] = useState<Record<number, number[]>>({});
+  const [durations, setDurations] = useState<Record<number, number>>({});
   const [loaded, setLoaded] = useState(new Set<number>());
   const [saving, setSaving] = useState(false);
   const [mediaReload, setMediaReload] = useState(0);
   const projectRef = useRef(project);
   projectRef.current = project;
   const simulator = useRef<SceneSimulator | null>(null);
+  const previewOperation = useRef(0);
   const audio = useRef(new PreviewAudio());
+  useEffect(
+    () => () => {
+      previewOperation.current++;
+      audio.current.dispose();
+    },
+    [],
+  );
   const loadedPaths = useRef(new Map<number, string>());
   const loadGeneration = useRef(0);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -113,6 +123,7 @@ export function App() {
   }, [dirty]);
 
   const stopPreview = () => {
+    previewOperation.current++;
     setRunning(false);
     setStarted(false);
     simulator.current?.stop();
@@ -138,6 +149,7 @@ export function App() {
     setProject(allocated);
     setDirty(true);
     if (simulator.current) stopPreview();
+    else audio.current.stopAll();
   };
   const undo = () => {
     if (!history.length) return;
@@ -174,6 +186,7 @@ export function App() {
     setSelectedStateId(next.initialStateId);
     setSelectedEventId(null);
     setWaveforms({});
+    setDurations({});
     setLoaded(new Set());
     loadedPaths.current.clear();
   };
@@ -270,10 +283,12 @@ export function App() {
   const applySnapshot = (next: SimulatorSnapshot) => {
     setSnapshot(next);
     setPosition(next.elapsedMs);
-    audio.current.sync(next.audio);
+    audio.current.sync(next.audio, projectRef.current.audio.tracks);
   };
   const play = async () => {
+    const operation = ++previewOperation.current;
     try {
+      audio.current.stopAudition();
       if (running) {
         setRunning(false);
         await audio.current.pause();
@@ -282,6 +297,7 @@ export function App() {
       if (!simulator.current)
         simulator.current = createSimulator(projectRef.current);
       await audio.current.resume();
+      if (operation !== previewOperation.current) return;
       const next = simulator.current.snapshot();
       applySnapshot(next);
       setSelectedStateId(next.stateId);
@@ -293,6 +309,7 @@ export function App() {
     }
   };
   const resetPreview = () => {
+    previewOperation.current++;
     try {
       audio.current.stopAll();
       simulator.current = createSimulator(projectRef.current);
@@ -302,7 +319,8 @@ export function App() {
       setSelectedStateId(next.stateId);
       setSelectedEventId(null);
       setStarted(true);
-      if (running) audio.current.sync(next.audio);
+      if (running)
+        audio.current.sync(next.audio, projectRef.current.audio.tracks);
     } catch (error) {
       notify(errorText(error), true);
     }
@@ -405,6 +423,13 @@ export function App() {
             ),
           ),
         );
+        setDurations((old) =>
+          Object.fromEntries(
+            Object.entries(old).filter(
+              ([number]) => !numbers.has(Number(number)),
+            ),
+          ),
+        );
       }
       return;
     }
@@ -416,6 +441,20 @@ export function App() {
         if (!track.path || loadedPaths.current.get(track.number) === track.path)
           continue;
         audio.current.remove(String(track.number));
+        setLoaded(
+          (old) =>
+            new Set([...old].filter((number) => number !== track.number)),
+        );
+        setWaveforms((old) => {
+          const next = { ...old };
+          delete next[track.number];
+          return next;
+        });
+        setDurations((old) => {
+          const next = { ...old };
+          delete next[track.number];
+          return next;
+        });
         try {
           const result = await window.cpc!.readAudio(track.path);
           if (!isCurrent()) return;
@@ -429,6 +468,25 @@ export function App() {
           if (!isCurrent()) return;
           loadedPaths.current.set(track.number, track.path);
           setWaveforms((old) => ({ ...old, [track.number]: peaks }));
+          const durationMs = Math.round(
+            audio.current.duration(String(track.number)),
+          );
+          setDurations((old) => ({ ...old, [track.number]: durationMs }));
+          const currentTrack = projectRef.current.audio.tracks.find(
+            (item) => item.number === track.number,
+          );
+          if (
+            currentTrack?.path === track.path &&
+            currentTrack.durationMs !== durationMs
+          ) {
+            // Decoded metadata is a cache: opening a file should not mark it edited.
+            const next = structuredClone(projectRef.current);
+            next.audio.tracks.find(
+              (item) => item.number === track.number,
+            )!.durationMs = durationMs;
+            projectRef.current = next;
+            setProject(next);
+          }
           setLoaded((old) => new Set([...old, track.number]));
         } catch (error) {
           if (isCurrent())
@@ -469,6 +527,11 @@ export function App() {
       throw error;
     }
     if (!isCurrent()) return;
+    const original = projectRef.current.audio.tracks.find(
+      (item) => item.number === track.number,
+    );
+    const durationMs = Math.round(audio.current.duration(String(track.number)));
+    const linked = { ...track, durationMs, trimStartMs: 0, trimEndMs: null };
     loadedPaths.current.set(
       track.number,
       track.path ?? `browser:${track.name}`,
@@ -477,14 +540,15 @@ export function App() {
       const index = next.audio.tracks.findIndex(
         (item) => item.number === track.number,
       );
-      if (index >= 0) next.audio.tracks[index] = track;
-      else next.audio.tracks.push(track);
+      if (index >= 0) next.audio.tracks[index] = linked;
+      else next.audio.tracks.push(linked);
     });
     setWaveforms((old) => ({ ...old, [track.number]: peaks }));
+    setDurations((old) => ({ ...old, [track.number]: durationMs }));
     setLoaded((old) => new Set([...old, track.number]));
     setMediaReload((old) => old + 1);
     notify(
-      `Track ${String(track.number).padStart(3, "0")} linked. State and ambient assignments are unchanged.`,
+      `Track ${String(track.number).padStart(3, "0")} linked. State and ambient assignments are unchanged.${original && ((original.trimStartMs ?? 0) > 0 || original.trimEndMs != null) ? " Trim reset to the full replacement file." : ""}`,
     );
   };
   const importAudio = async (existingNumber?: number) => {
@@ -548,10 +612,65 @@ export function App() {
       delete next[number];
       return next;
     });
+    setDurations((old) => {
+      const next = { ...old };
+      delete next[number];
+      return next;
+    });
   };
   const selectedTrack =
     state.foregroundTrack ??
     (state.id === project.initialStateId ? project.audio.ambientTrack : null);
+  const selectedMedia = project.audio.tracks.find(
+    (track) => track.number === selectedTrack,
+  );
+  const selectedWaveform = useMemo(
+    () =>
+      selectedMedia && loaded.has(selectedMedia.number)
+        ? audio.current.waveform(selectedMedia)
+        : undefined,
+    [selectedMedia, loaded, waveforms],
+  );
+  const selectedClip =
+    selectedMedia && loaded.has(selectedMedia.number)
+      ? getMediaClip(selectedMedia, durations[selectedMedia.number])
+      : undefined;
+  const previewTrim = async (
+    number: number,
+    startMs: number,
+    endMs: number,
+  ) => {
+    stopPreview();
+    try {
+      await audio.current.audition(String(number), startMs, endMs);
+    } catch (error) {
+      notify(`Could not preview trim: ${errorText(error)}`, true);
+    }
+  };
+  const saveTrimmedAudio = async (
+    number: number,
+    startMs: number,
+    endMs: number,
+  ) => {
+    const track = projectRef.current.audio.tracks.find(
+      (item) => item.number === number,
+    );
+    if (!track || !window.cpc) return;
+    audio.current.stopAudition();
+    try {
+      const result = await window.cpc.saveTrimmedAudio({
+        ...track,
+        trimStartMs: startMs,
+        trimEndMs: endMs,
+      });
+      if (result)
+        notify(
+          `Trimmed MP3 saved to ${result.path}. The original file was preserved.`,
+        );
+    } catch (error) {
+      notify(`Could not save trimmed MP3: ${errorText(error)}`, true);
+    }
+  };
   const updateState = (
     recipe: (next: SceneProject["states"][number]) => void,
   ) =>
@@ -802,14 +921,8 @@ export function App() {
                 onStop={stopPreview}
                 onReset={resetPreview}
                 activeOutputs={snapshot?.outputs ?? {}}
-                waveform={
-                  selectedTrack === null ? undefined : waveforms[selectedTrack]
-                }
-                waveformDuration={
-                  selectedTrack === null
-                    ? undefined
-                    : audio.current.duration(String(selectedTrack))
-                }
+                waveform={selectedWaveform}
+                waveformDuration={selectedClip?.durationMs}
                 waveformLoop={
                   state.id === project.initialStateId || state.loopAudio
                 }
@@ -1213,6 +1326,18 @@ export function App() {
             onReplace={(number) => void importAudio(number)}
             onRemove={removeTrack}
             loaded={loaded}
+            waveforms={waveforms}
+            durations={durations}
+            onPreviewTrim={(number, startMs, endMs) =>
+              void previewTrim(number, startMs, endMs)
+            }
+            onStopTrim={() => audio.current.stopAudition()}
+            onSaveTrim={
+              window.cpc
+                ? (number, startMs, endMs) =>
+                    saveTrimmedAudio(number, startMs, endMs)
+                : undefined
+            }
             onRetry={() => setMediaReload((old) => old + 1)}
             onExport={() => {
               void window.cpc

@@ -1,3 +1,4 @@
+import { Fragment, useState } from "react";
 import {
   Cable,
   Cpu,
@@ -5,6 +6,7 @@ import {
   Music2,
   Plus,
   Radio,
+  Scissors,
   SlidersHorizontal,
   Trash2,
 } from "lucide-react";
@@ -18,6 +20,7 @@ import { createTrigger, OUTPUT_COLORS } from "../shared/defaults";
 import { LIMITS } from "../shared/model";
 import type { SceneProject, ValidationIssue } from "../shared/model";
 import { resolveAudioTransition } from "../shared";
+import { AudioTrimEditor } from "./AudioTrimEditor";
 
 export interface EditorProps {
   project: SceneProject;
@@ -575,6 +578,11 @@ export function Media({
   onExport,
   onRetry,
   loaded,
+  waveforms,
+  durations,
+  onPreviewTrim,
+  onStopTrim,
+  onSaveTrim,
 }: EditorProps & {
   onImport(): void;
   onReplace(number: number): void;
@@ -582,7 +590,13 @@ export function Media({
   onExport(): void;
   onRetry(): void;
   loaded: Set<number>;
+  waveforms: Record<number, number[]>;
+  durations: Record<number, number>;
+  onPreviewTrim(number: number, startMs: number, endMs: number): void;
+  onStopTrim(): void;
+  onSaveTrim?(number: number, startMs: number, endMs: number): Promise<void>;
 }) {
+  const [editingTrack, setEditingTrack] = useState<number | null>(null);
   const transition = resolveAudioTransition(project.audio);
   return (
     <div className="content-page">
@@ -759,7 +773,9 @@ export function Media({
             Each player needs the same track library. Export media creates a
             folder named 01 containing numbered MP3 files: 001.mp3, 002.mp3, and
             so on. Copy that folder to each card. The project retains original
-            filenames for editing.
+            filenames for editing. Applied trims are rendered into the exported
+            files, so the players start at your chosen beginning and stop at
+            your chosen end.
           </p>
           <button
             disabled={!project.audio.tracks.length || !window.cpc}
@@ -781,42 +797,101 @@ export function Media({
             </span>
           </div>
           {project.audio.tracks.map((track) => (
-            <div className="media-track" key={track.number}>
-              <div className="track-number">
-                {String(track.number).padStart(3, "0")}
-              </div>
-              <div className="grow">
-                <div className="media-track-name">{track.name}</div>
-                <div className="track-path" title={track.path}>
-                  {track.path ?? "No file linked"}
+            <Fragment key={track.number}>
+              <div className="media-track">
+                <div className="track-number">
+                  {String(track.number).padStart(3, "0")}
                 </div>
-              </div>
-              <span
-                className={`badge ${loaded.has(track.number) ? "green" : ""}`}
-              >
-                {loaded.has(track.number) ? "Preview ready" : "Not loaded"}
-              </span>
-              {!loaded.has(track.number) && track.path && window.cpc && (
-                <button className="ghost small" onClick={onRetry}>
-                  Retry
+                <div className="grow">
+                  <div className="media-track-name">{track.name}</div>
+                  <div className="track-path" title={track.path}>
+                    {track.path ?? "No file linked"}
+                  </div>
+                  {track.trimStartMs || track.trimEndMs != null ? (
+                    <div className="track-trim-summary">
+                      Trim: {((track.trimStartMs ?? 0) / 1000).toFixed(3)} s
+                      {" → "}
+                      {track.trimEndMs == null
+                        ? "end of track"
+                        : `${(track.trimEndMs / 1000).toFixed(3)} s`}
+                    </div>
+                  ) : null}
+                </div>
+                <span
+                  className={`badge ${loaded.has(track.number) ? "green" : ""}`}
+                >
+                  {loaded.has(track.number) ? "Preview ready" : "Not loaded"}
+                </span>
+                {!loaded.has(track.number) && track.path && window.cpc && (
+                  <button className="ghost small" onClick={onRetry}>
+                    Retry
+                  </button>
+                )}
+                <button
+                  className="ghost small"
+                  aria-label={`Trim audio for track ${track.number}`}
+                  aria-expanded={editingTrack === track.number}
+                  onClick={() => {
+                    onStopTrim();
+                    setEditingTrack(
+                      editingTrack === track.number ? null : track.number,
+                    );
+                  }}
+                >
+                  <Scissors size={14} />
+                  {editingTrack === track.number
+                    ? "Close editor"
+                    : "Trim audio"}
                 </button>
+                <button
+                  className="ghost small"
+                  aria-label={`Replace or link file for track ${track.number}`}
+                  data-testid={`replace-track-${track.number}`}
+                  onClick={() => onReplace(track.number)}
+                >
+                  {loaded.has(track.number) ? "Replace file" : "Link file"}
+                </button>
+                <button
+                  className="icon ghost"
+                  aria-label={`Remove track ${track.name}`}
+                  onClick={() => onRemove(track.number)}
+                >
+                  <Trash2 size={15} />
+                </button>
+              </div>
+              {editingTrack === track.number && (
+                <AudioTrimEditor
+                  track={track}
+                  waveform={waveforms[track.number]}
+                  durationMs={durations[track.number]}
+                  loaded={loaded.has(track.number)}
+                  onApply={(startMs, endMs) =>
+                    change((next) => {
+                      const selected = next.audio.tracks.find(
+                        (item) => item.number === track.number,
+                      );
+                      if (!selected) return;
+                      selected.trimStartMs = startMs;
+                      selected.trimEndMs = endMs;
+                      if (durations[track.number])
+                        selected.durationMs = Math.round(
+                          durations[track.number],
+                        );
+                    })
+                  }
+                  onPreview={(startMs, endMs) =>
+                    onPreviewTrim(track.number, startMs, endMs)
+                  }
+                  onStop={onStopTrim}
+                  onSave={
+                    onSaveTrim
+                      ? (startMs, endMs) =>
+                          onSaveTrim(track.number, startMs, endMs)
+                      : undefined
+                  }
+                />
               )}
-              <button
-                className="ghost small"
-                aria-label={`Replace or link file for track ${track.number}`}
-                data-testid={`replace-track-${track.number}`}
-                onClick={() => onReplace(track.number)}
-              >
-                {loaded.has(track.number) ? "Replace file" : "Link file"}
-              </button>
-              <button
-                className="icon ghost"
-                aria-label={`Remove track ${track.name}`}
-                onClick={() => onRemove(track.number)}
-              >
-                <Trash2 size={15} />
-              </button>
-            </div>
+            </Fragment>
           ))}
           {!project.audio.tracks.length && (
             <div className="empty">
