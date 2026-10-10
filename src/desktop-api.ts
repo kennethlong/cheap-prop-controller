@@ -1,0 +1,47 @@
+import type { BoardId, MediaTrack, SceneProject } from "./shared/model";
+export interface PortInfo {
+  path: string;
+  manufacturer?: string;
+  serialNumber?: string;
+}
+export interface DeviceReply {
+  type: string;
+  [key: string]: unknown;
+}
+export interface ProjectFile {
+  project: SceneProject;
+  path: string;
+}
+export interface DeviceStatus {
+  connected: boolean;
+  port?: string;
+}
+export interface DesktopAPI {
+  listPorts(): Promise<PortInfo[]>;
+  connect(port: string): Promise<DeviceReply>;
+  disconnect(): Promise<void>;
+  deviceCommand(command: string): Promise<DeviceReply>;
+  uploadScene(bytes: number[]): Promise<DeviceReply>;
+  flashFirmware(
+    board: BoardId,
+    port: string,
+    variant?: "default" | "old-bootloader",
+  ): Promise<{ success: boolean; log: string }>;
+  openProject(): Promise<ProjectFile | null>;
+  saveProject(
+    project: SceneProject,
+    saveAs?: boolean,
+  ): Promise<ProjectFile | null>;
+  importAudio(trackNumber: number): Promise<MediaTrack | null>;
+  readAudio(path: string): Promise<{ dataUrl: string }>;
+  exportMedia(
+    project: SceneProject,
+  ): Promise<{ directory: string; files: number } | null>;
+  onDeviceLog(callback: (line: string) => void): () => void;
+  onDeviceStatus(callback: (status: DeviceStatus) => void): () => void;
+}
+declare global {
+  interface Window {
+    cpc?: DesktopAPI;
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "project": "Cheap Prop Controller",
+  "baseline": "2026-10-09",
+  "architecture": {"desktop":"Electron, React, TypeScript","firmware":"Arduino C++, PlatformIO","execution":"Autonomous microcontroller; PC is editor and preview","storage":"Onboard EEPROM with accurate scene capacity; sparse timed events","projectFormat":"Versioned JSON and adjacent audio asset directory"},
+  "mvp": ["Uno, classic ATmega328P Nano, ATmega2560 Mega, 5V 16MHz ATmega328P Pro Mini profiles", "Shared pin allocation with OctoBanger-compatible four-relay shield preset", "Named states with per-state timelines, trigger transitions and reset", "PIR, button/footpad, HC-SR04 trigger configurations", "YX5300 and DFPlayer serial control, optional persistent ambient, multi-player crossfade", "50ms event snapping and desktop simulation", "Project save/load, numbered audio-card export, firmware installation, scene deployment and serial monitor"],
+  "softwareLimits": {"outputs":32,"states":8,"triggers":8,"players":3},
+  "firstHardware": {"port":"COM6","board":"Uno","wiring":"USB only, user confirmed","overwriteAuthorized":true},
+  "deferred": ["ESP wireless transport", "Visual node graph as alternative state editor", "Legacy OBC import", "Video control", "External scene storage", "3.3V Pro Mini profile", "Hardware feedback from MP3 players"],
+  "physicalVerificationRequired": ["MP3 module/clone playback and folder indexing", "Audio startup latency and stepped fade quality", "Mixed-module command pacing", "Software serial interference with HC-SR04 distance sensing", "Actual loaded relay polarity and start/reset behavior", "PIR and ultrasonic installation thresholds", "macOS and Linux release/hardware testing"]
+}

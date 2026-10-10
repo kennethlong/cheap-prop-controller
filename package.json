@@ -1,0 +1,81 @@
+{
+  "name": "cheap-prop-controller",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A desktop scene editor and autonomous Arduino prop controller",
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build && node scripts/build-electron.mjs",
+    "start": "electron .",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "typecheck": "tsc --noEmit",
+    "package": "npm run build && electron-builder --dir",
+    "package:portable": "npm run build && electron-builder --win portable",
+    "firmware:build": "node scripts/build-firmware.mjs",
+    "prepare:resources": "node scripts/prepare-resources.mjs",
+    "fixtures": "node scripts/make-fixtures.mjs",
+    "format": "prettier --write src tests/**/*.ts scripts/*.mjs scripts/*.ts *.json *.ts",
+    "format:check": "prettier --check src tests/**/*.ts scripts/*.mjs scripts/*.ts *.json *.ts",
+    "test:firmware": "powershell -File tests/firmware/run-host-tests.ps1"
+  },
+  "build": {
+    "appId": "org.cheap-prop-controller.desktop",
+    "productName": "Cheap Prop Controller",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "tools"
+      }
+    ],
+    "asarUnpack": [
+      "**/*.node"
+    ],
+    "win": {
+      "target": "portable",
+      "signAndEditExecutable": false
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.utilities"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Utility"
+    }
+  },
+  "dependencies": {
+    "lucide-react": "^1.54.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "serialport": "^13.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.0",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "electron": "^44.7.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
+    "prettier": "^3.9.9",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.3"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

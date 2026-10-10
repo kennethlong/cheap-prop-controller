@@ -1,0 +1,34 @@
+{
+  "name": "Cheap Prop Controller scene image",
+  "version": 1,
+  "endianness": "little",
+  "tickMs": 50,
+  "limits": {"outputs":32,"triggers":8,"players":3,"states":8,"track":255},
+  "crc": {"algorithm":"CRC16-CCITT-FALSE","polynomial":4129,"initial":65535,"xorOut":0,"coverage":"Entire declared image, treating bytes 6 and 7 as zero"},
+  "boardIds": {"uno":1,"nano":2,"pro-mini":3,"mega":4},
+  "header": {"size":32,"fields":{
+    "0":"magic: ASCII CPC1 (4 bytes)","4":"imageLength:u16","6":"crc:u16",
+    "8":"board:u8","9":"outputCount:u8","10":"triggerCount:u8","11":"playerCount:u8",
+    "12":"stateCount:u8","13":"initialStateIndex:u8","14":"ambientTrack:u16 (0 means none)",
+    "16":"audioFlags:u8 (bit0 keepAmbient)","17":"fadeTicks:u8","18":"ambientVolume:u8 0..30","19":"reserved=0",
+    "20":"outputsOffset:u16","22":"triggersOffset:u16","24":"playersOffset:u16",
+    "26":"statesOffset:u16","28":"eventsOffset:u16","30":"transitionsOffset:u16"}},
+  "output": {"size":2,"fields":{"0":"pin:u8","1":"flags:u8 bit0 activeLow, bit1 idleActive"}},
+  "trigger": {"size":8,"fields":{"0":"kind:u8 button=0,pir=1,ultrasonic=2","1":"pin:u8 (ultrasonic trigger output)","2":"echoPin:u8 (255 for digital trigger)","3":"flags:u8 bit0 activeLow, bit1 pullup","4":"thresholdCm:u16","6":"hysteresisCm:u8","7":"debounceTicks:u8"}},
+  "player": {"size":4,"fields":{"0":"kind:u8 dfplayer=0,yx5300=1","1":"txPin:u8 (MCU transmit)","2":"rxPin:u8 (MCU receive)","3":"reserved=0"}},
+  "state": {"size":16,"fields":{"0":"durationTicks:u16 (nonzero)","2":"foregroundTrack:u16 (0 means none)","4":"eventStartIndex:u16","6":"eventCount:u16","8":"transitionStartIndex:u16","10":"transitionCount:u8","11":"volume:u8 0..30","12":"flags:u8 bit0 loopTimeline, bit1 loopAudio","13":"reserved=0 (3 bytes)"}},
+  "event": {"size":6,"fields":{"0":"startTick:u16 inclusive","2":"endTick:u16 exclusive","4":"outputIndex:u8","5":"reserved=0"}},
+  "transition": {"size":2,"fields":{"0":"triggerIndex:u8","1":"targetStateIndex:u8"}},
+  "layout":"Header, all outputs, all triggers, all players, all states, each state's events in state order, each state's transitions in state order. Offsets must equal this packed layout. Events sorted by startTick then outputIndex. No overlapping intervals on the same output within a state.",
+  "semantics":[
+    "All pins are numeric Arduino digital IDs; Uno/Nano/ProMini A0..A5=14..19, Mega A0..A15=54..69. D0,D1 always reserved for host serial. Nano/ProMini A6,A7 are never GPIO.",
+    "Each pin can have exactly one role. Custom AVR players use distinct valid pin pairs. Mega players use Serial1 TX18/RX19 then Serial2 TX16/RX17 then Serial3 TX14/RX15. Relay-shield first four outputs must use D7,D6,D5,D4.",
+    "State entry resets timeline elapsed to zero. Outputs take idleActive unless an event is active, when logical active=true. Physical high is logical active XOR activeLow. When not looping, events stop at duration and idle levels persist until transition. Looping wraps elapsed by duration.",
+    "STOP deactivates every output regardless of idleActive and stops audio. RESET/RUN resumes the initial state and its configured idleActive output levels. Every foreground state entry restarts the chosen foreground track; a retained ambient track preserves playback position.",
+    "Initial state is the ambient/idle state; entering it stops foreground and restores ambient. Any state with no foregroundTrack restores ambient. Persistent ambient requires its own player when foreground exists and remains running muted at volume zero during foreground playback, preserving position for return to ambient. Track numbers 1..255 map to folder /01 and filenames 001.mp3..255.mp3 (optional filename suffix after the three digits). Both player protocols use command 0x0F parameter 0x0100|track.",
+    "Triggers fire on debounced inactive-to-active edges; ultrasonic active at <=threshold, releases >=threshold+hysteresis. Inputs must first be observed inactive after startup. Held sensors never retrigger on state entry.",
+    "For simultaneous rising edges, first matching transition in current state's ordered transition list wins; only one transition per tick. Editor may order reset transition first. Transition to current state restarts it. Reset command always enters initial state.",
+    "Duration, event boundaries, debounce and fade are multiples of 50ms. Scene engine checks stop/reset independently of timeline advancement.",
+    "EEPROM upload must invalidate magic before modifying payload and write valid magic last after complete image CRC/validation. Incomplete image never runs. No transactional second scene bank is required."
+  ]
+}
