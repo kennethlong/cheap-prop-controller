@@ -22,11 +22,15 @@ static void fixture() {
   word(6, image.crc(92)); assert(image.valid(4096, 4));
   Serial1 = HardwareSerial{}; Serial2 = HardwareSerial{}; Serial3 = HardwareSerial{};
 }
+static size_t packetLength(const HardwareSerial& port) {
+  const uint8_t player = &port == &Serial1 ? 0 : &port == &Serial2 ? 1 : 2;
+  return image.b(image.player(player)) ? 8 : 10;
+}
 static unsigned commands(const HardwareSerial& port, uint8_t command, int parameter = -1) {
   unsigned result = 0;
   for (size_t i = 0; i < port.bytes.size();) {
     assert(port.bytes[i] == 0x7e);
-    const size_t length = (&port == &Serial2) ? 8 : 10;
+    const size_t length = packetLength(port);
     if (i + length > port.bytes.size()) break;
     assert(port.bytes[i + length - 1] == 0xef);
     const int value = (port.bytes[i + 5] << 8) | port.bytes[i + 6];
@@ -42,7 +46,7 @@ static void advance(cpc::AudioEngine& engine, uint32_t from, uint32_t to, bool e
   }
 }
 static uint32_t commandAt(const HardwareSerial& port, uint8_t command, int parameter, uint32_t after = 0) {
-  const size_t length = (&port == &Serial2) ? 8 : 10;
+  const size_t length = packetLength(port);
   for (size_t i = 0; i + length <= port.bytes.size(); i += length) {
     assert(port.bytes[i] == 0x7e && port.bytes[i + length - 1] == 0xef);
     const int value = (port.bytes[i + 5] << 8) | port.bytes[i + 6];
@@ -50,6 +54,14 @@ static uint32_t commandAt(const HardwareSerial& port, uint8_t command, int param
       return port.emittedAt[i];
   }
   return UINT32_MAX;
+}
+static void assertVolumeRange(const HardwareSerial& port, uint8_t minimum, uint8_t maximum, uint32_t after) {
+  const size_t length = packetLength(port);
+  for (size_t i = 0; i + length <= port.bytes.size(); i += length) {
+    assert(port.bytes[i] == 0x7e && port.bytes[i + length - 1] == 0xef);
+    if (port.emittedAt[i] >= after && port.bytes[i + 3] == 0x06)
+      assert(port.bytes[i + 5] == 0 && port.bytes[i + 6] >= minimum && port.bytes[i + 6] <= maximum);
+  }
 }
 static void sequentialFixture(bool persistent = false, uint16_t fadeOut = 150, uint16_t fadeIn = 350) {
   fixture();
@@ -202,6 +214,146 @@ static void testSequentialPacketCancellation() {
   assert(commands(Serial2, 0x0f, 0x0102) == 1);
   assert(commands(Serial1, 0x16) == 1); // Boot STOP only; ambient playback retained.
 }
+static void mixedFixture(bool sequential, uint8_t kind = 0, uint16_t fadeOut = 600, uint16_t fadeIn = 150) {
+  if (sequential) sequentialFixture(true, fadeOut, fadeIn);
+  else fixture();
+  bytes[16] |= 8 << 2;
+  bytes[32] = kind;
+  word(6, image.crc(image.u16(4))); assert(image.valid(4096, 4));
+}
+static void testMixedAmbientTransitions() {
+  // Exercise the complete idle -> foreground -> foreground -> idle path with
+  // both DFPlayer and YX5300 ambient packets, for crossfade, sequential and cut.
+  for (uint8_t kind = 0; kind < 2; ++kind) for (uint8_t mode = 0; mode < 3; ++mode) {
+    mixedFixture(mode != 0, kind);
+    if (mode == 2) {
+      bytes[16] &= ~2; bytes[17] = bytes[19] = 0;
+      word(6, image.crc(image.u16(4))); assert(image.valid(4096, 4));
+    }
+    cpc::AudioEngine engine;
+    engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, 3500);
+    const unsigned ambientStops = commands(Serial1, 0x16);
+    const unsigned mixedVolumes = commands(Serial1, 0x06, 8);
+    assert(commands(Serial1, 0x06, 20) == 1);
+    engine.enter(1, 3500); advance(engine, 3500, 4800);
+    assert(commands(Serial1, 0x06, 8) == mixedVolumes + 1);
+    assert(commands(Serial2, 0x0f, 0x0102) == 1);
+    assert(commands(Serial2, 0x06, 25) == 1);
+    if (mode == 1) {
+      // An idle foreground decoder starts before the longer ambient adjustment
+      // finishes: ambient cannot gate sequential readiness.
+      assert(commandAt(Serial2, 0x0f, 0x0102) < commandAt(Serial1, 0x06, 8, 3500));
+      assert(commandAt(Serial1, 0x06, 8, 3500) >= 4100);
+    }
+    const unsigned ambientVolumes = commands(Serial1, 0x06);
+    engine.enter(2, 4800); advance(engine, 4800, 6200);
+    const HardwareSerial& foreground = mode ? Serial2 : Serial3;
+    assert(commands(foreground, 0x0f, 0x0103) == 1);
+    assert(commands(foreground, 0x06, 30) == 1);
+    assert(commands(Serial1, 0x06) == ambientVolumes); // No dip during foreground handoff.
+    engine.enter(0, 6200); advance(engine, 6200, 7600);
+    assert(commands(Serial1, 0x06, 20) == 2);
+    if (mode == 1) {
+      // The normal ambient level returns over fade-in while foreground fades
+      // out independently; it need not wait for the outgoing STOP.
+      assert(commandAt(Serial1, 0x06, 20, 6200) < commandAt(foreground, 0x16, 0, 6200));
+      assert(commandAt(Serial1, 0x06, 20, 6200) >= 6350);
+    }
+    assertVolumeRange(Serial1, 8, 20, 3500);
+    assert(commands(Serial1, 0x0f, 0x0101) == 1);
+    assert(commands(Serial1, 0x16) == ambientStops);
+    engine.stop(7600); advance(engine, 7600, 8100);
+    assert(engine.stopped() && commands(Serial1, 0x16) == ambientStops + 1);
+  }
+}
+static void testMixedLatestAndStop() {
+  mixedFixture(true, 0, 1000, 150);
+  cpc::AudioEngine engine;
+  engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, 3500);
+  engine.enter(1, 3500); advance(engine, 3500, 3900);
+  engine.enter(2, 3900); advance(engine, 3900, 4200);
+  engine.enter(1, 4200); advance(engine, 4200, 5400);
+  assert(commands(Serial2, 0x0f, 0x0103) == 0); // Superseded foreground never starts.
+  assert(commands(Serial2, 0x0f, 0x0102) == 2);
+  assert(commandAt(Serial1, 0x06, 8, 3500) < 4600); // Repeated mixed target does not extend ambient fade.
+  assertVolumeRange(Serial1, 8, 20, 3500);
+  assert(commands(Serial1, 0x16) == 1 && commands(Serial1, 0x0f, 0x0101) == 1);
+
+  // Reverse the ambient envelope while foreground is still fading out. The
+  // latest idle request must restore normal volume immediately using fade-in.
+  engine.enter(2, 5400); advance(engine, 5400, 5600);
+  engine.enter(0, 5600); advance(engine, 5600, 5900);
+  assert(commandAt(Serial1, 0x06, 20, 5600) < 5850);
+  engine.enter(2, 5900); advance(engine, 5900, 6000);
+  engine.stop(6000); advance(engine, 6000, 7000);
+  assert(engine.stopped());
+  assert(commands(Serial2, 0x0f, 0x0103) == 0);
+  assert(commands(Serial1, 0x16) == 2);
+  assert(commandAt(Serial1, 0x0f, 0x0101, 6000) == UINT32_MAX);
+  engine.enter(0, 7000); advance(engine, 7000, 8000);
+  assert(commands(Serial1, 0x0f, 0x0101) == 2 && commands(Serial1, 0x06, 20) == 3);
+}
+static void testMixedStartupAndCancellation() {
+  for (uint8_t sequential = 0; sequential < 2; ++sequential) {
+    mixedFixture(sequential != 0);
+    cpc::AudioEngine engine;
+    engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, 100);
+    engine.enter(1, 100); advance(engine, 100, 200);
+    engine.enter(2, 200); advance(engine, 200, 4000);
+    assert(commands(Serial1, 0x0f, 0x0101) == 1);
+    assert(commands(Serial1, 0x06, 8) == 1 && commands(Serial1, 0x06, 20) == 0);
+    assert(commands(Serial1, 0x16) == 1);
+    if (sequential) assert(commands(Serial2, 0x0f, 0x0102) == 0);
+    // A zero normal level must preserve ambient so that the next foreground
+    // can raise it again without resetting its playhead.
+    bytes[18] = 0;
+    engine.enter(0, 4000); advance(engine, 4000, 5200);
+    engine.enter(1, 5200); advance(engine, 5200, 6500);
+    assert(commands(Serial1, 0x0f, 0x0101) == 1 && commands(Serial1, 0x16) == 1);
+    assert(commands(Serial1, 0x06, 8) == 2);
+  }
+
+  // Retain an ambient PLAY queued before a rapid trigger; discard a queued
+  // foreground PLAY, while STOP cancels all queued playback including ambient.
+  mixedFixture(true, 0, 0, 0);
+  cpc::AudioEngine engine;
+  engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, 3500);
+  const uint32_t ambientAt = commandAt(Serial1, 0x0f, 0x0101);
+  engine.enter(1, 3500); advance(engine, 3500, 4500);
+  const uint32_t foregroundAt = commandAt(Serial2, 0x0f, 0x0102);
+  mixedFixture(true, 0, 0, 0);
+  engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, ambientAt);
+  engine.enter(1, ambientAt); advance(engine, ambientAt, 3500);
+  assert(commands(Serial1, 0x0f, 0x0101) == 1 && commands(Serial1, 0x16) == 1);
+  mixedFixture(true, 0, 0, 0);
+  engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, 3500);
+  engine.enter(1, 3500); advance(engine, 3500, foregroundAt);
+  engine.enter(2, foregroundAt); advance(engine, foregroundAt, 4500);
+  assert(commands(Serial2, 0x0f, 0x0102) == 0 && commands(Serial2, 0x0f, 0x0103) == 1);
+  assert(commands(Serial1, 0x06, 0) == 1 && commands(Serial1, 0x16) == 1);
+  mixedFixture(true, 0, 0, 0);
+  engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, ambientAt);
+  engine.stop(ambientAt); advance(engine, ambientAt, 3500);
+  assert(commands(Serial1, 0x0f, 0x0101) == 0 && engine.stopped());
+
+  // A partly transmitted foreground PLAY retains framing, then STOP silences
+  // every decoder and prevents either fade from restoring a later volume.
+  mixedFixture(true, 0, 0, 0);
+  engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, 3500);
+  engine.enter(1, 3500); advance(engine, 3500, foregroundAt + 3);
+  engine.stop(foregroundAt + 3); advance(engine, foregroundAt + 3, 4500);
+  assert(commands(Serial2, 0x0f, 0x0102) == 1 && engine.stopped());
+  assert(commandAt(Serial2, 0x16, 0, foregroundAt) != UINT32_MAX);
+  assert(commandAt(Serial2, 0x06, 25, foregroundAt) == UINT32_MAX);
+  assert(commands(Serial1, 0x16) == 2);
+
+  // The same framing guarantee applies when STOP interrupts ambient startup.
+  mixedFixture(true, 0, 0, 0);
+  engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, ambientAt + 3);
+  engine.stop(ambientAt + 3); advance(engine, ambientAt + 3, 3500);
+  assert(commands(Serial1, 0x0f, 0x0101) == 1 && engine.stopped());
+  assert(commands(Serial1, 0x16) == 2 && commands(Serial1, 0x06, 20) == 0);
+}
 static void testSameTrackInDifferentRoles() {
   fixture();
   // Two decoders; ambient and foreground intentionally use the same looping
@@ -266,5 +418,6 @@ int main() {
   assert(commands(Serial2, 0x16) == 3);
   testSameTrackInDifferentRoles();
   testSequentialDurations(); testSequentialLatestAndStop(); testSequentialPersistentAmbient(); testSequentialPacketCancellation();
-  puts("Audio host tests passed: initialization, framing, crossfade, sequential fade timings, latest target, persistent ambient, STOP, echo scheduling.");
+  testMixedAmbientTransitions(); testMixedLatestAndStop(); testMixedStartupAndCancellation();
+  puts("Audio host tests passed: framing, crossfade/cut/sequential fades, continuous ambient mixing, latest target, startup, STOP, echo scheduling.");
 }

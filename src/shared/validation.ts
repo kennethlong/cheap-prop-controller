@@ -90,6 +90,8 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
   if (audio) {
     number(audio.ambientTrack, "audio.ambientTrack", true);
     number(audio.ambientVolume, "audio.ambientVolume");
+    if (audio.ambientMixVolume !== undefined)
+      number(audio.ambientMixVolume, "audio.ambientMixVolume");
     number(audio.fadeMs, "audio.fadeMs");
     if (audio.transitionMode !== undefined)
       enumeration(
@@ -354,6 +356,8 @@ export function validateProject(value: unknown): ValidationIssue[] {
   };
   trackReference(project.audio.ambientTrack, "audio.ambientTrack");
   integer(project.audio.ambientVolume, 0, 30, "audio.ambientVolume");
+  if (project.audio.ambientMixVolume !== undefined)
+    integer(project.audio.ambientMixVolume, 0, 30, "audio.ambientMixVolume");
   ticks(project.audio.fadeMs, 0, 12750, "audio.fadeMs");
   if (project.audio.fadeOutMs !== undefined)
     ticks(project.audio.fadeOutMs, 0, 12750, "audio.fadeOutMs");

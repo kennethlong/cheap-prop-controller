@@ -1,5 +1,8 @@
 import { BOARD_PROFILES } from "./boards";
-import { resolveAudioTransition } from "./audio-settings";
+import {
+  resolveAmbientMixVolume,
+  resolveAudioTransition,
+} from "./audio-settings";
 import type { BoardId, SceneProject, ValidationIssue } from "./model";
 import {
   estimateSceneBytes,
@@ -84,7 +87,10 @@ export function compileProject(project: SceneProject): CompiledScene {
   u16(14, project.audio.ambientTrack ?? 0);
   const transition = resolveAudioTransition(project.audio);
   const sequential = transition.mode === "fade-through";
-  bytes[16] = (project.audio.keepAmbient ? 1 : 0) | (sequential ? 2 : 0);
+  bytes[16] =
+    (project.audio.keepAmbient ? 1 : 0) |
+    (sequential ? 2 : 0) |
+    (resolveAmbientMixVolume(project.audio) << 2);
   bytes[17] = (sequential ? transition.fadeInMs : transition.crossfadeMs) / 50;
   bytes[18] = project.audio.ambientVolume;
   bytes[19] = sequential ? transition.fadeOutMs / 50 : 0;

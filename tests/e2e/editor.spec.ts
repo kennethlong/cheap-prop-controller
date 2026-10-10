@@ -178,13 +178,9 @@ test("fade-through settings persist and reserve one player unless ambient contin
   await expect(playerCount).toHaveText("1");
   await page.getByLabel("Fade-out milliseconds").fill("200");
   await page.getByLabel("Fade-in milliseconds").fill("450");
-  await page
-    .getByLabel("Keep ambient running silently during foreground audio")
-    .check();
+  await page.getByLabel("Ambient during foreground").selectOption("silent");
   await expect(playerCount).toHaveText("2");
-  await page
-    .getByLabel("Keep ambient running silently during foreground audio")
-    .uncheck();
+  await page.getByLabel("Ambient during foreground").selectOption("stop");
   await expect(playerCount).toHaveText("1");
 
   const downloadPromise = page.waitForEvent("download");
@@ -216,6 +212,118 @@ test("fade-through settings persist and reserve one player unless ambient contin
   await expect(page.getByLabel("Fade-out milliseconds")).toHaveValue("200");
   await expect(page.getByLabel("Fade-in milliseconds")).toHaveValue("450");
   await expect(playerCount).toHaveText("1");
+});
+
+test("ambient mixing preserves settings, player allocation, and preview state transitions", async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const sample = JSON.parse(
+    await readFile("examples/three-state-starter.cpc.json", "utf8"),
+  );
+  sample.audio.tracks = [1, 2, 3].map((number) => ({
+    number,
+    name: `Track ${number}`,
+  }));
+  sample.audio.ambientTrack = 1;
+  sample.audio.ambientVolume = 20;
+  sample.audio.keepAmbient = true;
+  delete sample.audio.ambientMixVolume;
+  sample.audio.fadeMs = 400;
+  sample.states.find(
+    (state: { id: string }) => state.id === "approach",
+  ).foregroundTrack = 2;
+  sample.states.find(
+    (state: { id: string }) => state.id === "scare",
+  ).foregroundTrack = 3;
+  await page.goto("/");
+  const projectInput = page.locator('input[type=file][accept=".json,.cpc"]');
+  await projectInput.setInputFiles({
+    name: "legacy-silent-ambient.cpc.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(sample)),
+  });
+  const mediaTab = page
+    .getByRole("navigation", { name: "Workspace" })
+    .getByRole("button", { name: "Media", exact: true });
+  await mediaTab.click();
+  const behavior = page.getByLabel("Ambient during foreground");
+  const mixVolume = page.getByLabel("Ambient mixed volume (1–30)");
+  const playerCount = page
+    .locator(".resource-stat")
+    .filter({ hasText: "Players required by these settings" })
+    .locator("strong");
+  await expect(behavior).toHaveValue("silent");
+  await expect(mixVolume).toHaveCount(0);
+  await expect(playerCount).toHaveText("3");
+  await behavior.selectOption("mix");
+  await expect(mixVolume).toHaveValue("10");
+  await mixVolume.fill("0");
+  await expect(mixVolume).toHaveValue("1");
+  await expect(behavior).toHaveValue("mix");
+  await mixVolume.fill("9");
+  await expect(
+    page.getByLabel("Ambient volume (0–30)", { exact: true }),
+  ).toHaveValue("20");
+  await expect(playerCount).toHaveText("3");
+
+  await behavior.selectOption("stop");
+  await expect(mixVolume).toHaveCount(0);
+  await expect(playerCount).toHaveText("2");
+  await behavior.selectOption("mix");
+  await expect(mixVolume).toHaveValue("9");
+  await page.getByLabel("Audio transition").selectOption("cut");
+  await expect(playerCount).toHaveText("2");
+  await page.getByLabel("Audio transition").selectOption("fade-through");
+  await page.getByLabel("Fade-out milliseconds").fill("200");
+  await page.getByLabel("Fade-in milliseconds").fill("400");
+  await expect(playerCount).toHaveText("2");
+  await behavior.selectOption("silent");
+  await expect(mixVolume).toHaveCount(0);
+  await expect(playerCount).toHaveText("2");
+  await behavior.selectOption("mix");
+  await expect(mixVolume).toHaveValue("10");
+  await mixVolume.fill("9");
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save project", exact: true }).click();
+  const download = await downloadPromise;
+  const saved = JSON.parse(await readFile((await download.path())!, "utf8"));
+  expect(saved.audio).toMatchObject({
+    keepAmbient: true,
+    ambientMixVolume: 9,
+    ambientVolume: 20,
+    transitionMode: "fade-through",
+    fadeOutMs: 200,
+    fadeInMs: 400,
+  });
+  expect(saved.audio.players).toHaveLength(2);
+  await behavior.selectOption("stop");
+  await projectInput.setInputFiles({
+    name: "saved-ambient-mix.cpc.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(saved)),
+  });
+  await mediaTab.click();
+  await expect(behavior).toHaveValue("mix");
+  await expect(mixVolume).toHaveValue("9");
+  await expect(page.getByLabel("Audio transition")).toHaveValue("fade-through");
+  await expect(playerCount).toHaveText("2");
+  await page.getByRole("button", { name: "Hardware", exact: true }).click();
+  await expect(page.getByLabel("Player 2 type")).toBeVisible();
+  await expect(page.getByLabel("Player 3 type")).toHaveCount(0);
+  await page.getByRole("button", { name: "Scene", exact: true }).click();
+  await page.getByRole("button", { name: "Play preview", exact: true }).click();
+  const triggers = page.locator(".preview-buttons");
+  await triggers.getByRole("button", { name: "Approach", exact: true }).click();
+  await expect(page.getByTestId("preview-state")).toHaveText("Approach");
+  await triggers.getByRole("button", { name: "Scare", exact: true }).click();
+  await expect(page.getByTestId("preview-state")).toHaveText("Scare");
+  await triggers.getByRole("button", { name: "Reset", exact: true }).click();
+  await expect(page.getByTestId("preview-state")).toHaveText("Idle");
+  await page.getByRole("button", { name: "Stop preview", exact: true }).click();
+  expect(errors).toEqual([]);
 });
 
 test("media trim editor previews a selection, validates bounds, and persists it without replacing the source", async ({

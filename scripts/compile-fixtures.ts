@@ -44,6 +44,15 @@ const compiledFade = compileProject(fadeProject);
 if (!compiledFade.bytes.length)
   throw new Error(JSON.stringify(compiledFade.issues));
 await writeFile("artifacts/scenes/uno-fade-through.bin", compiledFade.bytes);
+const ambientMix = structuredClone(fadeProject);
+ambientMix.audio.keepAmbient = true;
+ambientMix.audio.ambientMixVolume = 8;
+const compiledMix = compileProject(synchronizeAudioPlayers(ambientMix));
+if (!compiledMix.bytes.length)
+  throw new Error(JSON.stringify(compiledMix.issues));
+await writeFile("artifacts/scenes/uno-ambient-mix.bin", compiledMix.bytes);
+if (process.argv.includes("--golden"))
+  await writeFile("tests/core/ambient-mix-scene.bin", compiledMix.bytes);
 if (process.argv.includes("--golden"))
   await writeFile(
     "tests/core/single-player-fade-scene.bin",

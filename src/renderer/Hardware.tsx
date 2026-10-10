@@ -600,6 +600,11 @@ export function Media({
 }) {
   const [editingTrack, setEditingTrack] = useState<number | null>(null);
   const transition = resolveAudioTransition(project.audio);
+  const ambientBehavior = !project.audio.keepAmbient
+    ? "stop"
+    : (project.audio.ambientMixVolume ?? 0) > 0
+      ? "mix"
+      : "silent";
   return (
     <div className="content-page">
       <div className="page-heading">
@@ -738,24 +743,58 @@ export function Media({
             Output timelines start immediately when a state changes; they do not
             wait for audio fades.
           </p>
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={project.audio.keepAmbient}
+          <label>
+            Ambient during foreground
+            <select
+              aria-label="Ambient during foreground"
+              value={ambientBehavior}
               onChange={(e) =>
                 change((next) => {
-                  next.audio.keepAmbient = e.target.checked;
+                  next.audio.keepAmbient = e.target.value !== "stop";
+                  if (e.target.value === "silent")
+                    next.audio.ambientMixVolume = 0;
+                  else if (e.target.value === "mix")
+                    next.audio.ambientMixVolume =
+                      (next.audio.ambientMixVolume ?? 0) > 0
+                        ? next.audio.ambientMixVolume
+                        : 10;
                 })
               }
-            />
-            Keep ambient running silently during foreground audio
+            >
+              <option value="stop">Stop ambient</option>
+              <option value="silent">Keep running silently</option>
+              <option value="mix">Mix with foreground</option>
+            </select>
           </label>
+          {ambientBehavior === "mix" && (
+            <label>
+              Ambient mixed volume (1–30)
+              <input
+                aria-label="Ambient mixed volume (1–30)"
+                type="number"
+                min="1"
+                max="30"
+                step="1"
+                value={project.audio.ambientMixVolume}
+                onChange={(e) =>
+                  change((next) => {
+                    next.audio.ambientMixVolume = Math.max(
+                      1,
+                      Number(e.target.value),
+                    );
+                  })
+                }
+              />
+            </label>
+          )}
           <p className="hint">
-            With this option, ambient keeps its place while muted, then returns
-            at its current position using the selected transition. Otherwise, it
-            restarts when the scene returns to idle. Keeping ambient requires a
-            separate player from foreground audio, including with fade out /
-            fade in.
+            Keeping ambient silently or mixed preserves its playback position.
+            It returns to normal ambient volume in states with no foreground
+            track, including idle. Stop ambient restarts it when it returns.
+            Persistent ambient and foreground audio need two players; foreground
+            crossfades with persistent ambient need three. With fade out / fade
+            in, mixed ambient stays audible and changes volume independently
+            while foreground tracks switch.
           </p>
           <div className="resource-stat">
             <span>Players required by these settings</span>

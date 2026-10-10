@@ -90,3 +90,17 @@ Application 0.3.2 opens the project picker in the current scene JSON's folder, o
 - TypeScript, formatting, and the production build pass.
 - The real Electron project workflow passes in development and the packaged Windows app. It verifies Open's folder after MP3 import and SD export, persistence in a fresh app process, and preservation after cancelled or invalid project opens. Test preferences are isolated from the user's settings.
 - The Windows build is under `release/0.3.2/`; `Start Controller.cmd` selects it. Evidence: `artifacts/desktop-project-results.json`. No physical controller was accessed.
+
+## Audible ambient mixing — October 10, 2026
+
+Application 0.4.0 and firmware 0.3.0 add **Mix with foreground** alongside **Stop ambient** and **Keep running silently**. The mixed level is independent of normal ambient volume. Ambient retains its playhead across foreground changes and restores its normal level in any state without a foreground track. During sequential fades, mixed ambient keeps playing and follows its own volume envelope while the foreground player switches tracks.
+
+The optional `ambientMixVolume` defaults to zero for old projects. It occupies five previously reserved header bits, so it adds no EEPROM bytes or players beyond existing persistent-ambient allocation. Upload preflight requires the firmware's `audioAmbientMix` capability before BEGIN; unsupported firmware keeps its current stored scene intact.
+
+- All 116 application tests and seven browser workflows pass. They cover legacy projects, independent saved volumes, mode changes, player allocation, packed images, malformed settings, unsupported firmware, preview transitions, and preservation of ambient position and fade deadlines.
+- All three native firmware suites pass, including four desktop-generated binary fixtures. DFPlayer and YX5300 packet tests cover mixed-volume targets, cut/crossfade/sequential transitions, zero normal volume, startup, rapid triggers, queued/in-flight command cancellation, reset, and STOP.
+- TypeScript, formatting, and the production desktop build pass. Uno, classic Nano, Mega 2560, and Pro Mini 5 V/16 MHz firmware builds pass. Uno uses 14,966 bytes of flash and 534 bytes of static SRAM; Mega uses 16,492 bytes and 999 bytes respectively. Stack usage is additional.
+- The Windows build is staged in `release/0.4.0/`. All four bundled firmware HEX files match the fresh compiler output byte for byte.
+- The packaged Electron app passes real MP3 decode and Web Audio checks with muted computer playback. Save/reopen preserves normal volume 20 and mixed volume 8; the same ambient source remains audible across foreground changes and reset. Crossfade overlaps three sources; sequential fades allocate two players, with a 30 ms preview disposal tail. Evidence: `artifacts/desktop-ambient-mix-results.json`.
+
+No physical controller was accessed or flashed during this update. Hardware use requires installing the bundled firmware and combining the MP3 players' line outputs through the bench mixer. Actual module fade quality and electrical audio mixing remain hardware checks. A foreground MP3 ending naturally does not restore ambient volume; that happens when the scene enters a state without foreground audio.

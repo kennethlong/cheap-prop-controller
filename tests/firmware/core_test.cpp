@@ -45,9 +45,26 @@ static void testIntegrity() {
   fixture(); bytes[79] = 31; seal(); assert(!image.valid(1024, 1));
   fixture(); word(54, 1); seal(); assert(!image.valid(1024, 1)); // no decoder
   fixture(); bytes[33] = 4; seal(); assert(!image.valid(1024, 1));
-  fixture(); bytes[16] = 4; seal(); assert(!image.valid(1024, 1)); // Unknown audio feature bit.
+  fixture(); bytes[16] = 128; seal(); assert(!image.valid(1024, 1)); // Reserved audio feature bit.
   fixture(); bytes[19] = 1; seal(); assert(!image.valid(1024, 1)); // Legacy reserved byte remains zero.
   fixture(); bytes[16] = 2; bytes[17] = bytes[19] = 255; seal(); assert(image.valid(1024, 1)); // Independent max fade ticks.
+}
+static void testAmbientMixValidation() {
+  fixture();
+  // One ambient-only decoder is sufficient even with a retained mixed level.
+  memmove(bytes + 56, bytes + 52, size - 52); size += 4;
+  word(4, size); bytes[11] = 1;
+  word(26, 56); word(28, 88); word(30, 106);
+  bytes[52] = 0; bytes[53] = 6; bytes[54] = 7; bytes[55] = 0;
+  word(14, 1); bytes[16] = 1 | (30 << 2); bytes[18] = 20;
+  seal(); assert(image.valid(1024, 1)); assert(image.ambientMixVolume() == 30);
+  bytes[16] = 1 | (31 << 2); seal(); assert(!image.valid(1024, 1));
+  bytes[16] = 1 | (8 << 2) | 128; seal(); assert(!image.valid(1024, 1));
+  bytes[16] = 8 << 2; seal(); assert(!image.valid(1024, 1)); // Nonpersistent mix is malformed.
+  bytes[16] = 1 | (8 << 2); word(14, 0); seal(); assert(!image.valid(1024, 1));
+  word(14, 1); bytes[16] |= 2; bytes[17] = 3; bytes[19] = 7;
+  seal(); assert(image.valid(1024, 1)); assert(image.ambientMixVolume() == 8);
+  word(74, 2); seal(); assert(!image.valid(1024, 1)); // Persistent foreground still needs two decoders.
 }
 static void testTimeline() {
   fixture();
@@ -101,7 +118,7 @@ static void testPackets() {
   assert(crc == 0x29b1);
 }
 int main(int argc, char** argv) {
-  testIntegrity(); testTimeline(); testDebounce(); testPackets();
+  testIntegrity(); testAmbientMixValidation(); testTimeline(); testDebounce(); testPackets();
   if (argc > 1) {
     FILE* file = nullptr;
 #ifdef _MSC_VER

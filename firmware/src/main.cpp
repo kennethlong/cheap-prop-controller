@@ -45,14 +45,14 @@ void ack(const __FlashStringHelper* command) {
 }
 void status(bool hello) {
   Serial.print(F("{\"type\":\"")); Serial.print(hello ? F("hello") : F("status"));
-  Serial.print(F("\",\"protocol\":1,\"firmware\":\"0.2.0\",\"board\":\"")); Serial.print(boardName());
+  Serial.print(F("\",\"protocol\":1,\"firmware\":\"0.3.0\",\"board\":\"")); Serial.print(boardName());
   Serial.print(F("\",\"capacity\":")); Serial.print(EEPROM.length());
   Serial.print(F(",\"valid\":")); Serial.print(validScene ? F("true") : F("false"));
   Serial.print(F(",\"running\":")); Serial.print(engine.running ? F("true") : F("false"));
   Serial.print(F(",\"state\":")); if (validScene) Serial.print(engine.currentState); else Serial.print(F("null"));
   Serial.print(F(",\"elapsed\":")); Serial.print(engine.running ? millis() - engine.enteredAt : 0);
   Serial.print(F(",\"outputs\":")); Serial.print(outputMask);
-  Serial.println(F(",\"audioFeedback\":false,\"audioFadeThrough\":true}"));
+  Serial.println(F(",\"audioFeedback\":false,\"audioFadeThrough\":true,\"audioAmbientMix\":true}"));
 }
 void stateChanged() {
   Serial.print(F("{\"type\":\"state\",\"state\":")); Serial.print(engine.currentState); Serial.println(F(",\"elapsed\":0}"));

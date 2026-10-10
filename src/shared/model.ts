@@ -76,6 +76,8 @@ export interface SceneProject {
     ambientTrack: number | null;
     ambientVolume: number;
     keepAmbient: boolean;
+    /** Level under foreground audio when retained; omitted/zero keeps it silent. */
+    ambientMixVolume?: number;
     fadeMs: number;
     /** Omitted in older projects: infer crossfade/cut from fadeMs. */
     transitionMode?: AudioTransitionMode;

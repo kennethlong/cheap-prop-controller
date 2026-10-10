@@ -6,6 +6,7 @@ import {
   createDefaultProject,
   parseProject,
   requiredPlayerCount,
+  resolveAmbientMixVolume,
   resolveAudioTransition,
   synchronizeAudioPlayers,
   validateProject,
@@ -28,6 +29,81 @@ function audioProject(): SceneProject {
 }
 
 describe("audio transition configuration", () => {
+  it("preserves legacy silent ambient and independently saves the mixed level", () => {
+    const legacy = audioProject();
+    legacy.audio.keepAmbient = true;
+    delete legacy.audio.ambientMixVolume;
+    const oldImage = compileProject(synchronizeAudioPlayers(legacy));
+    expect(resolveAmbientMixVolume(legacy.audio)).toBe(0);
+    legacy.audio.ambientMixVolume = 0;
+    expect(compileProject(synchronizeAudioPlayers(legacy)).bytes).toEqual(
+      oldImage.bytes,
+    );
+    legacy.audio.ambientMixVolume = 8;
+    const restored = parseProject(JSON.stringify(legacy));
+    expect(restored.audio.ambientVolume).toBe(20);
+    expect(resolveAmbientMixVolume(restored.audio)).toBe(8);
+    restored.audio.keepAmbient = false;
+    expect(resolveAmbientMixVolume(restored.audio)).toBe(0);
+    expect(restored.audio.ambientMixVolume).toBe(8);
+    restored.audio.keepAmbient = true;
+    restored.audio.ambientTrack = null;
+    expect(resolveAmbientMixVolume(restored.audio)).toBe(0);
+  });
+
+  it("packs audible ambient without extra storage or players", () => {
+    const project = audioProject();
+    project.audio.keepAmbient = true;
+    const silent = compileProject(synchronizeAudioPlayers(project));
+    project.audio.ambientMixVolume = 8;
+    const mixed = compileProject(synchronizeAudioPlayers(project));
+    expect(mixed.issues.filter((issue) => issue.severity === "error")).toEqual(
+      [],
+    );
+    expect(mixed.bytes[16]).toBe(1 | 2 | (8 << 2));
+    expect(mixed.bytes[18]).toBe(20);
+    expect(mixed.usedBytes).toBe(silent.usedBytes);
+    expect(mixed.bytes[11]).toBe(2);
+    expect(Buffer.from(mixed.bytes)).toEqual(
+      readFileSync(new URL("./ambient-mix-scene.bin", import.meta.url)),
+    );
+    project.audio.transitionMode = "crossfade";
+    expect(requiredPlayerCount(project)).toBe(3);
+    project.audio.transitionMode = "cut";
+    expect(requiredPlayerCount(project)).toBe(2);
+    project.audio.ambientMixVolume = 30;
+    expect(compileProject(synchronizeAudioPlayers(project)).bytes[16]).toBe(
+      121,
+    );
+    project.audio.keepAmbient = false;
+    expect(compileProject(synchronizeAudioPlayers(project)).bytes[16]).toBe(0);
+  });
+
+  it.each([-1, 31, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "rejects invalid ambient mixed volume %s",
+    (value) => {
+      const project = audioProject();
+      project.audio.ambientMixVolume = value;
+      expect(
+        validateProject(project).some(
+          (issue) => issue.path === "audio.ambientMixVolume",
+        ),
+      ).toBe(true);
+      expect(compileProject(project).bytes).toHaveLength(0);
+    },
+  );
+
+  it("rejects malformed ambient mixed volume on import", () => {
+    const project = audioProject();
+    for (const value of [null, "10", true, {}])
+      expect(() =>
+        parseProject({
+          ...project,
+          audio: { ...project.audio, ambientMixVolume: value },
+        }),
+      ).toThrow("audio.ambientMixVolume");
+  });
+
   it("fits sequential transitions on one Uno player and releases the second player's pins", () => {
     const project = audioProject();
     expect(requiredPlayerCount(project)).toBe(1);

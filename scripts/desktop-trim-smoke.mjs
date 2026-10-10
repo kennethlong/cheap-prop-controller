@@ -91,7 +91,7 @@ const checks = [];
 let screenshot;
 try {
   const version = await desktop.evaluate(({ app }) => app.getVersion());
-  expect(version).toBe("0.3.2");
+  expect(version).toBe("0.4.0");
   const page = await desktop.firstWindow();
   page.on("pageerror", (error) => errors.push(error.message));
   await desktop.evaluate(

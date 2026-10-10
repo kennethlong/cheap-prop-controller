@@ -93,6 +93,7 @@ export function createDefaultProject(): SceneProject {
       ambientTrack: null,
       ambientVolume: 20,
       keepAmbient: false,
+      ambientMixVolume: 0,
       fadeMs: 500,
       tracks: [],
     },

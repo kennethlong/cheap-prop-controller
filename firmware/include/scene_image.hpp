@@ -10,6 +10,7 @@ struct SceneImage {
   ReadByte read;
   uint8_t b(uint16_t offset) const { return read(offset); }
   uint16_t u16(uint16_t offset) const { return static_cast<uint16_t>(b(offset)) | static_cast<uint16_t>(b(offset + 1)) << 8; }
+  uint8_t ambientMixVolume() const { return (b(16) >> 2) & 31; }
   uint16_t output(uint8_t index) const { return u16(20) + index * 2; }
   uint16_t trigger(uint8_t index) const { return u16(22) + index * 8; }
   uint16_t player(uint8_t index) const { return u16(24) + index * 4; }
@@ -35,7 +36,8 @@ struct SceneImage {
     const uint16_t length = u16(4);
     if (length < HeaderSize || length > capacity || b(8) != board) return false;
     if (b(9) > MaxOutputs || b(10) > MaxTriggers || b(11) > MaxPlayers || !b(12) || b(12) > MaxStates || b(13) >= b(12)) return false;
-    if (u16(14) > 255 || (b(16) & ~3U) || b(18) > 30 || (!(b(16) & 2) && b(19))) return false;
+    if (u16(14) > 255 || (b(16) & 128) || ambientMixVolume() > 30 || b(18) > 30 || (!(b(16) & 2) && b(19))) return false;
+    if (ambientMixVolume() && (!(b(16) & 1) || !u16(14))) return false;
     uint16_t offset = HeaderSize;
     if (u16(20) != offset) return false;
     offset += b(9) * 2;

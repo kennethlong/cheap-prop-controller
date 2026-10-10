@@ -53,14 +53,31 @@ class AudioEngine {
     if (!packetIndex && packetSize && (packet[3] == 0x0f || packet[3] == 0x19)
         && !(preserveAmbient && packetPlayer == 0 && players[0].ambientRole)) packetSize = 0;
   }
+  void retargetAmbient(uint8_t volume, uint16_t duration, uint32_t now) {
+    Player& p = players[0];
+    const uint8_t ambient = static_cast<uint8_t>(image->u16(14));
+    if (p.track != ambient || !p.ambientRole || !p.loop)
+      start(0, ambient, true, volume, duration, now, true);
+    else if (p.target != volume) fade(0, volume, duration, now, true);
+    // Foreground transitions must neither restart an existing ambient fade nor
+    // stop its decoder, including when normal ambient volume is zero.
+    p.preserve = true;
+  }
   void requestFadeThrough(uint8_t stateIndex, uint32_t now) {
     pendingState = stateIndex;
+    const bool mixed = image->ambientMixVolume() != 0;
+    if (mixed) {
+      const bool foreground = image->u16(image->state(stateIndex) + 2) != 0;
+      retargetAmbient(foreground ? image->ambientMixVolume() : image->b(18),
+        image->b(foreground ? 19 : 17) * 50U, now);
+    }
     if (fadeThroughPending) return; // Latest target wins without extending the outgoing fade.
     fadeThroughPending = true;
     const uint16_t duration = image->b(19) * 50U;
     const bool persistent = (image->b(16) & 1) && image->u16(14);
     cancelUnsentStart(persistent);
     for (uint8_t i = 0; i < count; ++i) {
+      if (mixed && i == 0) continue; // Ambient runs independently of the foreground handoff.
       Player& p = players[i];
       const bool preserve = persistent && i == 0 && p.ambientRole;
       // A decoder still starting a superseded foreground must never proceed to
@@ -78,11 +95,12 @@ class AudioEngine {
 #if !defined(__AVR_ATmega2560__)
     if (timerUart::busy()) return false;
 #elif defined(ARDUINO)
-    if (count > 0 && !(UCSR1A & _BV(TXC1))) return false;
+    if (count > 0 && !image->ambientMixVolume() && !(UCSR1A & _BV(TXC1))) return false;
     if (count > 1 && !(UCSR2A & _BV(TXC2))) return false;
     if (count > 2 && !(UCSR3A & _BV(TXC3))) return false;
 #endif
     for (uint8_t i = 0; i < count; ++i) {
+      if (i == 0 && image->ambientMixVolume()) continue;
       const Player& p = players[i];
       if (p.stage != 2 || p.volume || (p.track && (!p.preserve || p.sentVolume))) return false;
     }
@@ -95,6 +113,12 @@ class AudioEngine {
     const uint8_t ambient = static_cast<uint8_t>(image->u16(14));
     const bool persistent = (image->b(16) & 1) && ambient;
     const uint16_t duration = image->b(17) * 50U;
+    if (image->ambientMixVolume()) {
+      // Ambient was retargeted at state entry; only foreground waits for silence.
+      if (foreground) start(1, foreground, image->b(state + 12) & 2,
+        image->b(state + 11), duration, now, false, true);
+      return;
+    }
     if (!foreground) {
       if (ambient) start(0, ambient, true, image->b(18), duration, now, true);
       return;
@@ -170,14 +194,20 @@ class AudioEngine {
         }
       }
       for (uint8_t i = 0; i < count; ++i) {
-        if (i == ambientPlayer) start(i, ambient, true, image->b(18), fadeMs, now, true);
+        if (i == ambientPlayer) {
+          if (image->ambientMixVolume()) retargetAmbient(image->b(18), fadeMs, now);
+          else start(i, ambient, true, image->b(18), fadeMs, now, true);
+        }
         else fade(i, 0, fadeMs, now, false);
       }
       return;
     }
     if (persistent) {
-      if (players[0].track != ambient) start(0, ambient, true, 0, 0, now, true);
-      fade(0, 0, fadeMs, now, true);
+      if (image->ambientMixVolume()) retargetAmbient(image->ambientMixVolume(), fadeMs, now);
+      else {
+        if (players[0].track != ambient) start(0, ambient, true, 0, 0, now, true);
+        fade(0, 0, fadeMs, now, true);
+      }
     }
     const uint8_t first = persistent ? 1 : 0;
     uint8_t chosen = first;

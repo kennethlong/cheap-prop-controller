@@ -1,6 +1,9 @@
 import type { SceneProject, SceneState } from "./model";
 import { parseProject, validateProject } from "./validation";
-import { resolveAudioTransition } from "./audio-settings";
+import {
+  resolveAmbientMixVolume,
+  resolveAudioTransition,
+} from "./audio-settings";
 
 export interface AudioVoice {
   role: "ambient" | "foreground";
@@ -243,6 +246,7 @@ export class SceneSimulator {
         pending.readyAt,
         resolveAudioTransition(this.project.audio).fadeInMs,
         this.project.audio.keepAmbient,
+        resolveAmbientMixVolume(this.project.audio) > 0,
       );
     }
     this.voices.forEach((voice) => {
@@ -272,6 +276,7 @@ export class SceneSimulator {
     startedAt: number,
     fadeDurationMs: number,
     retainAmbient = true,
+    preserveAmbientFade = false,
   ): void {
     const occupied = new Set<number>();
     const retained = desired.map((item) => ({
@@ -287,6 +292,8 @@ export class SceneSimulator {
       if (old) occupied.add(old.playerIndex);
     });
     this.voices = retained.map(({ item, old }) => {
+      // The mixed ambient envelope runs independently of foreground fade-through.
+      if (old && preserveAmbientFade) return old;
       const playerIndex =
         old?.playerIndex ??
         Array.from(
@@ -317,6 +324,8 @@ export class SceneSimulator {
         ? null
         : this.current.foregroundTrack;
     const transition = resolveAudioTransition(audio);
+    const ambientMixVolume = resolveAmbientMixVolume(audio);
+    const mixedAmbient = ambientMixVolume > 0;
     const desired: DesiredVoice[] = [];
     if (
       audio.ambientTrack !== null &&
@@ -325,7 +334,7 @@ export class SceneSimulator {
       desired.push({
         role: "ambient",
         track: audio.ambientTrack,
-        volume: foreground === null ? audio.ambientVolume : 0,
+        volume: foreground === null ? audio.ambientVolume : ambientMixVolume,
         loop: true,
       });
     if (foreground !== null)
@@ -335,16 +344,37 @@ export class SceneSimulator {
         volume: this.current.volume,
         loop: this.current.loopAudio,
       });
+    if (mixedAmbient && !immediate) {
+      const ambient = this.voices.find((voice) => voice.role === "ambient");
+      const target =
+        foreground === null ? audio.ambientVolume : ambientMixVolume;
+      if (ambient && ambient.targetVolume !== target) {
+        ambient.fadeFrom = ambient.volume;
+        ambient.fadeStartedAt = this.total;
+        ambient.fadeDurationMs =
+          transition.mode === "fade-through"
+            ? foreground === null
+              ? transition.fadeInMs
+              : transition.fadeOutMs
+            : transition.crossfadeMs;
+        ambient.targetVolume = target;
+        ambient.stopWhenSilent = false;
+      }
+    }
     if (!immediate && transition.mode === "fade-through") {
       if (this.pendingAudio) {
         // Trigger priority is immediate; only the newest audio target survives.
         this.pendingAudio.desired = desired;
       } else {
-        const duration = this.voices.some((voice) => voice.volume > 0)
+        const duration = this.voices.some(
+          (voice) =>
+            voice.volume > 0 && !(mixedAmbient && voice.role === "ambient"),
+        )
           ? transition.fadeOutMs
           : 0;
         this.pendingAudio = { desired, readyAt: this.total + duration };
         this.voices.forEach((voice) => {
+          if (mixedAmbient && voice.role === "ambient") return;
           voice.fadeFrom = voice.volume;
           voice.fadeStartedAt = this.total;
           voice.fadeDurationMs = duration;
@@ -368,6 +398,7 @@ export class SceneSimulator {
       return;
     }
     this.voices.forEach((voice) => {
+      if (mixedAmbient && voice.role === "ambient") return;
       voice.fadeFrom = voice.volume;
       voice.fadeStartedAt = this.total;
       voice.fadeDurationMs = transition.crossfadeMs;

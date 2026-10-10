@@ -109,6 +109,50 @@ afterEach(() => {
 });
 
 describe("serial upload and priority controls", () => {
+  it.each([undefined, false, "true"])(
+    "requires ambient mixing capability before modifying controller storage (%s)",
+    async (capability) => {
+      const { service, port } = await connected();
+      const project = createDefaultProject();
+      project.audio.transitionMode = "cut";
+      project.audio.ambientTrack = 1;
+      project.audio.tracks = [1, 2].map((number) => ({
+        number,
+        name: `Track ${number}`,
+      }));
+      project.states[1].foregroundTrack = 2;
+      project.audio.keepAmbient = true;
+      project.audio.ambientMixVolume = 8;
+      const values = Array.from(
+        compileProject(synchronizeAudioPlayers(project)).bytes,
+      );
+      port.onWrite = () =>
+        port.reply({ ...hello, audioAmbientMix: capability });
+      const rejected = failure(service.upload(values));
+      await flush();
+      expect(String(await rejected)).toContain("mix ambient with foreground");
+      expect(port.writes.some((command) => command.startsWith("BEGIN "))).toBe(
+        false,
+      );
+      port.onWrite = (command) => {
+        if (command === "HELLO")
+          port.reply({ ...hello, audioAmbientMix: true });
+        else if (command.startsWith("DATA ")) {
+          const [, offset, data] = command.split(" ");
+          port.reply({
+            type: "ack",
+            command: "DATA",
+            offset: Number(offset) + data.length / 2,
+          });
+        } else port.reply({ type: "ack", command: command.split(" ")[0] });
+      };
+      const accepted = service.upload(values);
+      await flush();
+      expect(await accepted).toEqual({ type: "ack", command: "COMMIT" });
+      await service.disconnect();
+    },
+  );
+
   it("requires fade-through capability before invalidating existing controller storage", async () => {
     const { service, port } = await connected();
     const project = createDefaultProject();
