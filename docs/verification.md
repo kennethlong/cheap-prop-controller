@@ -82,3 +82,11 @@ Application 0.3.1 stores source audio and rendered applied trims in `sounds/` be
 - The final packaged 0.3.1 Windows build passes the same checks without renderer errors. The standalone saved clip, project copy, and card export each decode to exactly 2.500 seconds; the eight-second original is unchanged. Screenshot inspected: `artifacts/desktop-trim-smoke.png`.
 
 The new Windows build is staged under `release/0.3.1/` so the existing running application can remain open. `Start Controller.cmd` selects the build matching `package.json`. No physical controller was accessed.
+
+## Project Open location — October 10, 2026
+
+Application 0.3.2 opens the project picker in the current scene JSON's folder, or the last successfully opened/saved project folder after restarting. The first launch falls back to Documents. Audio dialogs do not change the project preference; missing folders or damaged preferences fall back safely.
+
+- TypeScript, formatting, and the production build pass.
+- The real Electron project workflow passes in development and the packaged Windows app. It verifies Open's folder after MP3 import and SD export, persistence in a fresh app process, and preservation after cancelled or invalid project opens. Test preferences are isolated from the user's settings.
+- The Windows build is under `release/0.3.2/`; `Start Controller.cmd` selects it. Evidence: `artifacts/desktop-project-results.json`. No physical controller was accessed.

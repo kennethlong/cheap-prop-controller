@@ -9,10 +9,16 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { SerialService } from "./serial-service";
 import { ProjectStore } from "./project-store";
+import { ProjectFolder } from "./project-folder";
 import { flashFirmware } from "./firmware";
 import type { BoardId, MediaTrack } from "../shared/model";
 
 const serial = new SerialService();
+const projectFolder = new ProjectFolder(
+  process.env.CPC_TEST_SETTINGS_FILE ??
+    path.join(app.getPath("userData"), "project-folder.json"),
+  app.getPath("documents"),
+);
 const toolsRoot = app.isPackaged
   ? path.join(process.resourcesPath, "tools")
   : path.join(app.getAppPath(), "resources");
@@ -88,10 +94,14 @@ handle(
 handle("project:open", async () => {
   const result = await dialog.showOpenDialog(window!, {
     title: "Open scene project",
+    defaultPath: await projectFolder.get(projects.currentPath),
     properties: ["openFile"],
     filters: [{ name: "Controller project", extensions: ["json"] }],
   });
-  return result.canceled ? null : projects.open(result.filePaths[0]);
+  if (result.canceled) return null;
+  const opened = await projects.open(result.filePaths[0]);
+  await projectFolder.remember(opened.path);
+  return opened;
 });
 handle("project:save", async (project: unknown, saveAs = false) => {
   let filename = projects.currentPath;
@@ -105,7 +115,9 @@ handle("project:save", async (project: unknown, saveAs = false) => {
     if (result.canceled || !result.filePath) return null;
     filename = result.filePath;
   }
-  return projects.save(project, filename);
+  const saved = await projects.save(project, filename);
+  await projectFolder.remember(saved.path);
+  return saved;
 });
 handle("media:import", async (number: number) => {
   if (!Number.isInteger(number) || number < 1 || number > 255)

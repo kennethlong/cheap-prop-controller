@@ -80,14 +80,18 @@ async function decodedDuration(file) {
 const desktop = await electron.launch({
   ...(executable ? { executablePath: path.resolve(executable) } : {}),
   args: executable ? ["--mute-audio"] : [".", "--mute-audio"],
-  env: { ...process.env, CPC_TEST_HIDDEN: visible ? "0" : "1" },
+  env: {
+    ...process.env,
+    CPC_TEST_HIDDEN: visible ? "0" : "1",
+    CPC_TEST_SETTINGS_FILE: path.join(directory, "project-folder.json"),
+  },
 });
 const errors = [];
 const checks = [];
 let screenshot;
 try {
   const version = await desktop.evaluate(({ app }) => app.getVersion());
-  expect(version).toBe("0.3.1");
+  expect(version).toBe("0.3.2");
   const page = await desktop.firstWindow();
   page.on("pageerror", (error) => errors.push(error.message));
   await desktop.evaluate(

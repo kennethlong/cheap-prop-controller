@@ -18,6 +18,8 @@ The starter project has eight outputs, three button triggers, and Idle → Appro
 
 The device console exposes physical trigger injection and status. A physical trigger is an input to the currently uploaded project; preview and edited-but-not-uploaded settings do not change the controller.
 
+**Open** starts in the current scene's folder, or the last successfully opened/saved project folder after restarting. Importing or exporting audio does not change this location. On the first launch it uses Documents.
+
 Three editable projects are in `examples/`: the eight-output starter, an Uno scene with single-player fade transitions, and a Mega scene with PIR, HC-SR04, reset button, and three audio players. The audio examples have numbered track slots without included MP3s; use each track's **Replace / link file** action in Media to attach your files while preserving state assignments.
 
 ## Boards and storage
