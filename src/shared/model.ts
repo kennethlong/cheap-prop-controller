@@ -2,6 +2,7 @@ export type BoardId = "uno" | "nano" | "pro-mini" | "mega";
 export type WiringPreset = "custom" | "relay-shield";
 export type TriggerKind = "button" | "pir" | "ultrasonic";
 export type PlayerKind = "dfplayer" | "yx5300";
+export type AudioTransitionMode = "cut" | "crossfade" | "fade-through";
 
 export interface OutputConfig {
   id: string;
@@ -69,6 +70,10 @@ export interface SceneProject {
     ambientVolume: number;
     keepAmbient: boolean;
     fadeMs: number;
+    /** Omitted in older projects: infer crossfade/cut from fadeMs. */
+    transitionMode?: AudioTransitionMode;
+    fadeOutMs?: number;
+    fadeInMs?: number;
     tracks: MediaTrack[];
   };
   states: SceneState[];

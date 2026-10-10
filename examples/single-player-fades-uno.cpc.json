@@ -1,0 +1,244 @@
+{
+  "version": 1,
+  "name": "Single-player fade transitions",
+  "board": "uno",
+  "wiring": "relay-shield",
+  "initialStateId": "idle",
+  "outputs": [
+    {
+      "id": "output-1",
+      "name": "Entrance light",
+      "pin": 7,
+      "activeLow": false,
+      "idleActive": false,
+      "color": "#f87171"
+    },
+    {
+      "id": "output-2",
+      "name": "Air blast",
+      "pin": 6,
+      "activeLow": false,
+      "idleActive": false,
+      "color": "#4ade80"
+    },
+    {
+      "id": "output-3",
+      "name": "Creature",
+      "pin": 5,
+      "activeLow": false,
+      "idleActive": false,
+      "color": "#60a5fa"
+    },
+    {
+      "id": "output-4",
+      "name": "Spotlight",
+      "pin": 4,
+      "activeLow": false,
+      "idleActive": false,
+      "color": "#facc15"
+    },
+    {
+      "id": "output-5",
+      "name": "Output 5",
+      "pin": 11,
+      "activeLow": false,
+      "idleActive": false,
+      "color": "#c084fc"
+    },
+    {
+      "id": "output-6",
+      "name": "Output 6",
+      "pin": 12,
+      "activeLow": false,
+      "idleActive": false,
+      "color": "#22d3ee"
+    },
+    {
+      "id": "output-7",
+      "name": "Output 7",
+      "pin": 13,
+      "activeLow": false,
+      "idleActive": false,
+      "color": "#fb923c"
+    },
+    {
+      "id": "output-8",
+      "name": "Output 8",
+      "pin": 14,
+      "activeLow": false,
+      "idleActive": false,
+      "color": "#f472b6"
+    }
+  ],
+  "triggers": [
+    {
+      "id": "approach",
+      "name": "Approach",
+      "kind": "button",
+      "pin": 8,
+      "echoPin": null,
+      "activeLow": true,
+      "pullup": true,
+      "debounceMs": 100,
+      "thresholdCm": 100,
+      "hysteresisCm": 20
+    },
+    {
+      "id": "scare",
+      "name": "Scare",
+      "kind": "button",
+      "pin": 9,
+      "echoPin": null,
+      "activeLow": true,
+      "pullup": true,
+      "debounceMs": 100,
+      "thresholdCm": 100,
+      "hysteresisCm": 20
+    },
+    {
+      "id": "reset",
+      "name": "Reset",
+      "kind": "button",
+      "pin": 10,
+      "echoPin": null,
+      "activeLow": true,
+      "pullup": true,
+      "debounceMs": 100,
+      "thresholdCm": 100,
+      "hysteresisCm": 20
+    }
+  ],
+  "audio": {
+    "players": [
+      {
+        "id": "player-1",
+        "kind": "dfplayer",
+        "txPin": 2,
+        "rxPin": 3
+      }
+    ],
+    "ambientTrack": 1,
+    "ambientVolume": 20,
+    "keepAmbient": false,
+    "fadeMs": 500,
+    "tracks": [
+      {
+        "number": 1,
+        "name": "Bench ambient"
+      },
+      {
+        "number": 2,
+        "name": "Bench approach"
+      },
+      {
+        "number": 3,
+        "name": "Bench scare"
+      }
+    ],
+    "transitionMode": "fade-through",
+    "fadeOutMs": 150,
+    "fadeInMs": 350
+  },
+  "states": [
+    {
+      "id": "idle",
+      "name": "Idle",
+      "durationMs": 10000,
+      "loopTimeline": true,
+      "foregroundTrack": null,
+      "volume": 25,
+      "loopAudio": false,
+      "events": [],
+      "transitions": [
+        {
+          "triggerId": "reset",
+          "targetStateId": "idle"
+        },
+        {
+          "triggerId": "approach",
+          "targetStateId": "approach"
+        }
+      ]
+    },
+    {
+      "id": "approach",
+      "name": "Approach",
+      "durationMs": 10000,
+      "loopTimeline": false,
+      "foregroundTrack": 2,
+      "volume": 25,
+      "loopAudio": false,
+      "events": [
+        {
+          "id": "approach-light",
+          "outputId": "output-1",
+          "startMs": 0,
+          "endMs": 5000
+        }
+      ],
+      "transitions": [
+        {
+          "triggerId": "reset",
+          "targetStateId": "idle"
+        },
+        {
+          "triggerId": "scare",
+          "targetStateId": "scare"
+        }
+      ]
+    },
+    {
+      "id": "scare",
+      "name": "Scare",
+      "durationMs": 30000,
+      "loopTimeline": false,
+      "foregroundTrack": 3,
+      "volume": 25,
+      "loopAudio": false,
+      "events": [
+        {
+          "id": "scare-1",
+          "outputId": "output-1",
+          "startMs": 0,
+          "endMs": 3000
+        },
+        {
+          "id": "scare-2",
+          "outputId": "output-2",
+          "startMs": 500,
+          "endMs": 1500
+        },
+        {
+          "id": "scare-3",
+          "outputId": "output-3",
+          "startMs": 1000,
+          "endMs": 5000
+        },
+        {
+          "id": "scare-4",
+          "outputId": "output-2",
+          "startMs": 2500,
+          "endMs": 3500
+        },
+        {
+          "id": "scare-5",
+          "outputId": "output-4",
+          "startMs": 4000,
+          "endMs": 10000
+        },
+        {
+          "id": "scare-6",
+          "outputId": "output-1",
+          "startMs": 12000,
+          "endMs": 16000
+        }
+      ],
+      "transitions": [
+        {
+          "triggerId": "reset",
+          "targetStateId": "idle"
+        }
+      ]
+    }
+  ]
+}

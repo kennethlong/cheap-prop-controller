@@ -130,3 +130,90 @@ test("malformed import and invalid event edits remain repairable", async ({
   await page.getByLabel("Event end seconds").fill("3");
   await expect(page.getByText("Resolve before deploying")).toHaveCount(0);
 });
+
+test("fade-through settings persist and reserve one player unless ambient continues", async ({
+  page,
+}) => {
+  const sample = JSON.parse(
+    await readFile("examples/three-state-starter.cpc.json", "utf8"),
+  );
+  sample.audio.tracks = [
+    { number: 1, name: "Ambient" },
+    { number: 2, name: "Approach" },
+    { number: 3, name: "Scare" },
+  ];
+  sample.audio.ambientTrack = 1;
+  sample.audio.keepAmbient = false;
+  sample.audio.fadeMs = 400;
+  sample.states.find(
+    (state: { id: string }) => state.id === "approach",
+  ).foregroundTrack = 2;
+  sample.states.find(
+    (state: { id: string }) => state.id === "scare",
+  ).foregroundTrack = 3;
+
+  await page.goto("/");
+  const projectInput = page.locator('input[type=file][accept=".json,.cpc"]');
+  await projectInput.setInputFiles({
+    name: "legacy-audio.cpc.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(sample)),
+  });
+  await page
+    .getByRole("navigation", { name: "Workspace" })
+    .getByRole("button", { name: "Media", exact: true })
+    .click();
+  const playerCount = page
+    .locator(".resource-stat")
+    .filter({ hasText: "Players required by these settings" })
+    .locator("strong");
+  await expect(page.getByLabel("Audio transition")).toHaveValue("crossfade");
+  await expect(page.getByLabel("Crossfade milliseconds")).toHaveValue("400");
+  await expect(playerCount).toHaveText("2");
+
+  await page.getByLabel("Audio transition").selectOption("fade-through");
+  await expect(page.getByLabel("Fade-out milliseconds")).toHaveValue("250");
+  await expect(page.getByLabel("Fade-in milliseconds")).toHaveValue("250");
+  await expect(page.getByLabel("Crossfade milliseconds")).toHaveCount(0);
+  await expect(playerCount).toHaveText("1");
+  await page.getByLabel("Fade-out milliseconds").fill("200");
+  await page.getByLabel("Fade-in milliseconds").fill("450");
+  await page
+    .getByLabel("Keep ambient running silently during foreground audio")
+    .check();
+  await expect(playerCount).toHaveText("2");
+  await page
+    .getByLabel("Keep ambient running silently during foreground audio")
+    .uncheck();
+  await expect(playerCount).toHaveText("1");
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save project", exact: true }).click();
+  const download = await downloadPromise;
+  const saved = JSON.parse(await readFile((await download.path())!, "utf8"));
+  expect(saved.audio).toMatchObject({
+    transitionMode: "fade-through",
+    fadeOutMs: 200,
+    fadeInMs: 450,
+    fadeMs: 400,
+  });
+  expect(saved.audio.players).toHaveLength(1);
+
+  await page.getByLabel("Audio transition").selectOption("cut");
+  await expect(page.getByLabel("Fade-out milliseconds")).toHaveCount(0);
+  await expect(page.getByLabel("Fade-in milliseconds")).toHaveCount(0);
+  await expect(playerCount).toHaveText("1");
+  await projectInput.setInputFiles({
+    name: "saved-fades.cpc.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(saved)),
+  });
+  await page
+    .getByRole("navigation", { name: "Workspace" })
+    .getByRole("button", { name: "Media", exact: true })
+    .click();
+  await expect(page.getByLabel("Audio transition")).toHaveValue("fade-through");
+  await expect(page.getByLabel("Fade-out milliseconds")).toHaveValue("200");
+  await expect(page.getByLabel("Fade-in milliseconds")).toHaveValue("450");
+  await expect(playerCount).toHaveText("1");
+});

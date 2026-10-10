@@ -45,12 +45,16 @@ static void testIntegrity() {
   fixture(); bytes[79] = 31; seal(); assert(!image.valid(1024, 1));
   fixture(); word(54, 1); seal(); assert(!image.valid(1024, 1)); // no decoder
   fixture(); bytes[33] = 4; seal(); assert(!image.valid(1024, 1));
+  fixture(); bytes[16] = 4; seal(); assert(!image.valid(1024, 1)); // Unknown audio feature bit.
+  fixture(); bytes[19] = 1; seal(); assert(!image.valid(1024, 1)); // Legacy reserved byte remains zero.
+  fixture(); bytes[16] = 2; bytes[17] = bytes[19] = 255; seal(); assert(image.valid(1024, 1)); // Independent max fade ticks.
 }
 static void testTimeline() {
   fixture();
   cpc::SceneRuntime runtime; runtime.begin(&image);
   assert(runtime.activeOutputs(0) == 0);
   runtime.run(1000); assert(runtime.currentState == 0);
+  bytes[16] = 2; bytes[17] = bytes[19] = 255; // Long audio fades never delay state/output time.
   assert(!runtime.trigger(2, 1000));
   assert(runtime.trigger(1, 1000)); assert(runtime.currentState == 1);
   assert(runtime.activeOutputs(1000) == 1);

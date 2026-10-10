@@ -1,6 +1,6 @@
 # MVP verification
 
-Verified on Windows on October 9, 2026. The desktop application and firmware are implemented; physical audio, sensors, relays, and props still require the connected bench hardware.
+The original MVP was verified on Windows on October 9, 2026. The desktop application and firmware are implemented; physical audio, sensors, relays, and props still require the connected bench hardware. Verification of the October 10 fade-transition update appears below; the original COM6 measurements apply to firmware 0.1.0.
 
 ## Automated checks
 
@@ -44,3 +44,16 @@ Detailed local evidence is under `artifacts/`: `uno-bench-results.json`, `deskto
 ## Dependency status
 
 The production dependency audit reported no known vulnerabilities at verification time. The packaging toolchain reported eight moderate transitive advisories associated with `sprintf-js` through electron-builder's download/logging dependencies. No forced downgrade or untested dependency override was applied. This affects the development packaging dependency tree, not the shipped application's runtime dependency tree.
+
+## Fade out / fade in update — October 10, 2026
+
+Application and firmware version 0.2.0 add sequential audio transitions with separate outgoing and incoming durations. The default is 250 ms each; values range from 0 to 12,750 ms in 50 ms steps. Normal sequential playback requires one player; persistent ambient plus sequential foreground playback requires two. The binary header remains 32 bytes, and the new Uno example uses 176 bytes of scene storage.
+
+- All 59 application tests and all five browser workflows passed, including legacy settings, single-player allocation, independent durations, save/reopen, latest-trigger behavior, and STOP cancellation.
+- All three native firmware suites passed. They check packet order and timing, independent/zero durations, interruption during fades and decoder startup, persistent ambient, unsent PLAY cancellation, and completion of packets already partly transmitted. Three desktop-generated binary fixtures pass firmware validation, including the new single-player image.
+- TypeScript checking, formatting, and the production desktop build passed.
+- The packaged Windows app reported version 0.2.0, opened the single-player example, displayed its separate 150/350 ms durations and one-player allocation, and produced no renderer errors. Each bundled board HEX matched the corresponding fresh compiler output. Evidence: `artifacts/fade-through-desktop-results.json` and `artifacts/fade-through-desktop.png`.
+- Firmware builds passed for Uno, classic Nano, Mega 2560, and Pro Mini 5 V/16 MHz. Uno uses 14,366 bytes of flash and 534 bytes of static SRAM; Mega uses 15,860 bytes of flash and 999 bytes of static SRAM. Stack usage is additional.
+- A mocked serial integration test confirms that missing `audioFadeThrough` capability rejects upload before `BEGIN`, preserving the controller's existing stored scene. Supported firmware accepts the new image.
+
+No physical controller was accessed for this update. Firmware 0.2.0 must be installed before uploading a scene that uses the new transition. Actual decoder startup delay, command pacing, and audible fade quality still need measurement with connected audio modules. Output timelines begin at the trigger; they do not wait for the audio transition.

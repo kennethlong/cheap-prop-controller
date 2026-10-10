@@ -17,6 +17,7 @@ import {
 import { createTrigger, OUTPUT_COLORS } from "../shared/defaults";
 import { LIMITS } from "../shared/model";
 import type { SceneProject, ValidationIssue } from "../shared/model";
+import { resolveAudioTransition } from "../shared";
 
 export interface EditorProps {
   project: SceneProject;
@@ -549,10 +550,10 @@ export function Hardware({
             </p>
           )}
           <p className="hint">
-            Player count follows simultaneous playback needs. Crossfading uses
-            two players; continuous ambient plus foreground crossfades uses
-            three. Mix audio using suitable mixer inputs, never directly join
-            speaker outputs.
+            Player count follows simultaneous playback needs. Fade out / fade in
+            can switch tracks on one player. Crossfading uses two players;
+            continuous ambient plus foreground crossfades uses three. Mix audio
+            using suitable mixer inputs, never directly join speaker outputs.
           </p>
         </section>
         {issues.length > 0 && (
@@ -582,6 +583,7 @@ export function Media({
   onRetry(): void;
   loaded: Set<number>;
 }) {
+  const transition = resolveAudioTransition(project.audio);
   return (
     <div className="content-page">
       <div className="page-heading">
@@ -602,7 +604,7 @@ export function Media({
           <div className="card-heading">
             <h3>
               <Music2 size={17} />
-              Ambient & crossfades
+              Ambient & transitions
             </h3>
           </div>
           <TrackSelect
@@ -631,6 +633,34 @@ export function Media({
               />
             </label>
             <label>
+              Audio transition
+              <select
+                aria-label="Audio transition"
+                value={transition.mode}
+                onChange={(e) =>
+                  change((next) => {
+                    next.audio.transitionMode = e.target
+                      .value as typeof transition.mode;
+                    if (next.audio.transitionMode === "fade-through") {
+                      next.audio.fadeOutMs ??= 250;
+                      next.audio.fadeInMs ??= 250;
+                    } else if (
+                      next.audio.transitionMode === "crossfade" &&
+                      next.audio.fadeMs === 0
+                    ) {
+                      next.audio.fadeMs = 500;
+                    }
+                  })
+                }
+              >
+                <option value="cut">Hard cut</option>
+                <option value="crossfade">Crossfade</option>
+                <option value="fade-through">Fade out / fade in</option>
+              </select>
+            </label>
+          </div>
+          {transition.mode === "crossfade" && (
+            <label>
               Crossfade (ms)
               <input
                 aria-label="Crossfade milliseconds"
@@ -646,7 +676,52 @@ export function Media({
                 }
               />
             </label>
-          </div>
+          )}
+          {transition.mode === "fade-through" && (
+            <div className="field-grid">
+              <label>
+                Fade out (ms)
+                <input
+                  aria-label="Fade-out milliseconds"
+                  type="number"
+                  min="0"
+                  max="12750"
+                  step="50"
+                  value={transition.fadeOutMs}
+                  onChange={(e) =>
+                    change((next) => {
+                      next.audio.fadeOutMs = Number(e.target.value);
+                    })
+                  }
+                />
+              </label>
+              <label>
+                Fade in (ms)
+                <input
+                  aria-label="Fade-in milliseconds"
+                  type="number"
+                  min="0"
+                  max="12750"
+                  step="50"
+                  value={transition.fadeInMs}
+                  onChange={(e) =>
+                    change((next) => {
+                      next.audio.fadeInMs = Number(e.target.value);
+                    })
+                  }
+                />
+              </label>
+            </div>
+          )}
+          <p className="hint">
+            {transition.mode === "fade-through"
+              ? "Fade out / fade in lowers the current track to silence, switches tracks on the same player, then raises the new track. The silent gap also includes the module's track-loading time."
+              : transition.mode === "crossfade"
+                ? "Crossfade overlaps the outgoing and incoming tracks on separate players. A zero-duration crossfade switches tracks immediately."
+                : "Hard cut switches tracks immediately, with no volume ramp."}{" "}
+            Output timelines start immediately when a state changes; they do not
+            wait for audio fades.
+          </p>
           <label className="check">
             <input
               type="checkbox"
@@ -660,10 +735,11 @@ export function Media({
             Keep ambient running silently during foreground audio
           </label>
           <p className="hint">
-            With this option, ambient keeps its place while muted, then fades
-            back in at its current position. Otherwise, it fades out and
-            restarts when the scene returns to idle. Use a zero-duration fade
-            for hard cuts.
+            With this option, ambient keeps its place while muted, then returns
+            at its current position using the selected transition. Otherwise, it
+            restarts when the scene returns to idle. Keeping ambient requires a
+            separate player from foreground audio, including with fade out /
+            fade in.
           </p>
           <div className="resource-stat">
             <span>Players required by these settings</span>

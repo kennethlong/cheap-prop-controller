@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { compileProject, createDefaultProject } from "../../src/shared";
+import {
+  compileProject,
+  createDefaultProject,
+  synchronizeAudioPlayers,
+} from "../../src/shared";
 
 interface FakePort {
   path: string;
@@ -105,6 +109,38 @@ afterEach(() => {
 });
 
 describe("serial upload and priority controls", () => {
+  it("requires fade-through capability before invalidating existing controller storage", async () => {
+    const { service, port } = await connected();
+    const project = createDefaultProject();
+    project.audio.transitionMode = "fade-through";
+    const values = Array.from(
+      compileProject(synchronizeAudioPlayers(project)).bytes,
+    );
+    port.onWrite = () => port.reply(hello);
+    const rejected = failure(service.upload(values));
+    await flush();
+    expect(String(await rejected)).toContain("Install the updated firmware");
+    expect(port.writes.some((command) => command.startsWith("BEGIN "))).toBe(
+      false,
+    );
+
+    port.onWrite = (command) => {
+      if (command === "HELLO") port.reply({ ...hello, audioFadeThrough: true });
+      else if (command.startsWith("DATA ")) {
+        const [, offset, data] = command.split(" ");
+        port.reply({
+          type: "ack",
+          command: "DATA",
+          offset: Number(offset) + data.length / 2,
+        });
+      } else port.reply({ type: "ack", command: command.split(" ")[0] });
+    };
+    const accepted = service.upload(values);
+    await flush();
+    expect(await accepted).toEqual({ type: "ack", command: "COMMIT" });
+    await service.disconnect();
+  });
+
   it("uploads valid images in acknowledged chunks and commits only after the last chunk", async () => {
     const { service, port } = await connected();
     port.onWrite = (command) => {

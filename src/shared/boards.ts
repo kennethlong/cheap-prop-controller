@@ -5,6 +5,7 @@ import type {
   ValidationIssue,
 } from "./model";
 import { LIMITS } from "./model";
+import { resolveAudioTransition } from "./audio-settings";
 
 const pins = (last: number) =>
   Array.from({ length: last + 1 }, (_, index) => index);
@@ -125,6 +126,7 @@ export function allocatePins(project: SceneProject): AllocationResult {
 
 /** Players are determined by overlap, never by the number of files on a card. */
 export function requiredPlayerCount(project: SceneProject): number {
+  const { crossfadeMs } = resolveAudioTransition(project.audio);
   const foreground = new Set(
     project.states
       .filter(
@@ -137,9 +139,9 @@ export function requiredPlayerCount(project: SceneProject): number {
   if (!ambient && foreground.size === 0) return 0;
   if (foreground.size === 0) return 1;
   if (project.audio.keepAmbient && ambient) {
-    return project.audio.fadeMs > 0 && foreground.size > 1 ? 3 : 2;
+    return crossfadeMs > 0 && foreground.size > 1 ? 3 : 2;
   }
-  return project.audio.fadeMs > 0 && (ambient || foreground.size > 1) ? 2 : 1;
+  return crossfadeMs > 0 && (ambient || foreground.size > 1) ? 2 : 1;
 }
 
 export function synchronizeAudioPlayers(project: SceneProject): SceneProject {

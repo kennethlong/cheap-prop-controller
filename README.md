@@ -18,7 +18,7 @@ The starter project has eight outputs, three button triggers, and Idle → Appro
 
 The device console exposes physical trigger injection and status. A physical trigger is an input to the currently uploaded project; preview and edited-but-not-uploaded settings do not change the controller.
 
-Two editable projects are in `examples/`: the eight-output starter and a Mega scene with PIR, HC-SR04, reset button, and three audio players. The audio example has numbered track slots without included MP3s; use each track's **Replace / link file** action in Media to attach your files while preserving state assignments.
+Three editable projects are in `examples/`: the eight-output starter, an Uno scene with single-player fade transitions, and a Mega scene with PIR, HC-SR04, reset button, and three audio players. The audio examples have numbered track slots without included MP3s; use each track's **Replace / link file** action in Media to attach your files while preserving state assignments.
 
 ## Boards and storage
 
@@ -37,13 +37,16 @@ Scene size includes all states, events, transitions, and settings. It does not g
 
 ## Audio behavior
 
-- One player supports hard cuts.
+- One player supports hard cuts or **Fade out / fade in** transitions. In Media, choose the transition and set separate fade-out and fade-in times (250 ms defaults, 50 ms steps, 0–12,750 ms each). The old track fades to silence before the new track starts and fades in. Module loading and command pacing add a short gap; this is not an overlapping crossfade.
 - Two players support ordinary crossfades, or uninterrupted ambient position plus one foreground track at a time.
 - Three players support uninterrupted ambient position while crossfading between different foreground tracks.
 - **Keep ambient running silently** mutes ambient during foreground playback but preserves its position. Turning the option off lets ambient stop and restart when needed.
+- Fade out / fade in with persistent ambient needs two players: one retains ambient position, and the other switches foreground tracks sequentially. A rapid new trigger replaces the pending audio destination; STOP cancels pending playback. Prop events start immediately on the state transition, so audio may begin later than the first event.
 - Export writes `/01/001.mp3` through `/01/255.mp3`. Put the same library on every player's card. Runtime commands address folder 1 and the track number. MP3 files stay on the audio modules; scene data stays on the Arduino.
 
 DFPlayer Mini and YX5300/Catalex have separate packet encoders. This version sends commands without receiving playback acknowledgments. A healthy USB connection does not establish that a player/card is present or playing. Actual module folder handling, repeat mode, startup latency, and audible fade quality must be checked against the particular boards. Crossfades use paced 0–30 volume commands and are not sample-accurate.
+
+Existing projects keep their original audio transitions. Fade out / fade in requires firmware 0.2.0 or newer; use **Firmware → Install firmware** before uploading it. The app checks support before changing the controller's saved scene.
 
 Multiple players need separate mixer inputs or a suitable summing circuit before amplification. Do not join amplified speaker outputs. The displayed MCU TX pin connects to a module's RX; observe the module's signal-level requirements. RX pins are reserved for future feedback but the MVP does not decode module responses.
 

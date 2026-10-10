@@ -91,6 +91,15 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
     number(audio.ambientTrack, "audio.ambientTrack", true);
     number(audio.ambientVolume, "audio.ambientVolume");
     number(audio.fadeMs, "audio.fadeMs");
+    if (audio.transitionMode !== undefined)
+      enumeration(
+        audio.transitionMode,
+        ["cut", "crossfade", "fade-through"],
+        "audio.transitionMode",
+      );
+    if (audio.fadeOutMs !== undefined)
+      number(audio.fadeOutMs, "audio.fadeOutMs");
+    if (audio.fadeInMs !== undefined) number(audio.fadeInMs, "audio.fadeInMs");
     boolean(audio.keepAmbient, "audio.keepAmbient");
     array(audio.players, "audio.players", 32).forEach((candidate, index) => {
       const path = `audio.players.${index}`;
@@ -318,6 +327,10 @@ export function validateProject(value: unknown): ValidationIssue[] {
   trackReference(project.audio.ambientTrack, "audio.ambientTrack");
   integer(project.audio.ambientVolume, 0, 30, "audio.ambientVolume");
   ticks(project.audio.fadeMs, 0, 12750, "audio.fadeMs");
+  if (project.audio.fadeOutMs !== undefined)
+    ticks(project.audio.fadeOutMs, 0, 12750, "audio.fadeOutMs");
+  if (project.audio.fadeInMs !== undefined)
+    ticks(project.audio.fadeInMs, 0, 12750, "audio.fadeInMs");
   const requiredPlayers = requiredPlayerCount(project);
   if (project.audio.players.length < requiredPlayers)
     fail(

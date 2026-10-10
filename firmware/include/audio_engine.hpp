@@ -14,6 +14,8 @@ class AudioEngine {
     bool loop, preserve, ambientRole;
   } players[MaxPlayers];
   uint8_t count = 0, packet[10], packetSize = 0, packetIndex = 0, packetPlayer = 0, scan = 0;
+  uint8_t pendingState = 0;
+  bool fadeThroughPending = false;
   const SceneImage* image = nullptr;
 
   static bool due(uint32_t now, uint32_t at) { return static_cast<int32_t>(now - at) >= 0; }
@@ -45,8 +47,68 @@ class AudioEngine {
     }
     fade(index, volume, duration, now, false);
   }
+  void cancelUnsentStart(bool preserveAmbient = false) {
+    // Never truncate a packet that has entered the UART. A complete PLAY packet
+    // already on the wire cannot be recalled; it is followed by mute/STOP.
+    if (!packetIndex && packetSize && (packet[3] == 0x0f || packet[3] == 0x19)
+        && !(preserveAmbient && packetPlayer == 0 && players[0].ambientRole)) packetSize = 0;
+  }
+  void requestFadeThrough(uint8_t stateIndex, uint32_t now) {
+    pendingState = stateIndex;
+    if (fadeThroughPending) return; // Latest target wins without extending the outgoing fade.
+    fadeThroughPending = true;
+    const uint16_t duration = image->b(19) * 50U;
+    const bool persistent = (image->b(16) & 1) && image->u16(14);
+    cancelUnsentStart(persistent);
+    for (uint8_t i = 0; i < count; ++i) {
+      Player& p = players[i];
+      const bool preserve = persistent && i == 0 && p.ambientRole;
+      // A decoder still starting a superseded foreground must never proceed to
+      // its pending PLAY/loop commands. Its zero-volume playback, if already
+      // sent, is stopped below. An ambient startup is retained for persistence.
+      if (!preserve) {
+        if (p.stage < 2) p.track = 0;
+        else if (p.stage >= 3 && p.stage <= 5) p.stage = 2;
+      }
+      fade(i, 0, duration, now, preserve);
+    }
+  }
+  bool readyForFadeThrough() const {
+    if (packetIndex < packetSize) return false;
+#if !defined(__AVR_ATmega2560__)
+    if (timerUart::busy()) return false;
+#elif defined(ARDUINO)
+    if (count > 0 && !(UCSR1A & _BV(TXC1))) return false;
+    if (count > 1 && !(UCSR2A & _BV(TXC2))) return false;
+    if (count > 2 && !(UCSR3A & _BV(TXC3))) return false;
+#endif
+    for (uint8_t i = 0; i < count; ++i) {
+      const Player& p = players[i];
+      if (p.stage != 2 || p.volume || (p.track && (!p.preserve || p.sentVolume))) return false;
+    }
+    return true;
+  }
+  void applyFadeThrough(uint32_t now) {
+    fadeThroughPending = false;
+    const uint16_t state = image->state(pendingState);
+    const uint8_t foreground = static_cast<uint8_t>(image->u16(state + 2));
+    const uint8_t ambient = static_cast<uint8_t>(image->u16(14));
+    const bool persistent = (image->b(16) & 1) && ambient;
+    const uint16_t duration = image->b(17) * 50U;
+    if (!foreground) {
+      if (ambient) start(0, ambient, true, image->b(18), duration, now, true);
+      return;
+    }
+    if (persistent) {
+      start(0, ambient, true, 0, 0, now, true);
+      fade(0, 0, 0, now, true);
+    }
+    start(persistent ? 1 : 0, foreground, image->b(state + 12) & 2,
+      image->b(state + 11), duration, now, false, true);
+  }
  public:
   bool stopped() const {
+    if (fadeThroughPending) return false;
     if (packetIndex < packetSize) return false;
 #if !defined(__AVR_ATmega2560__)
     if (timerUart::busy()) return false;
@@ -64,6 +126,7 @@ class AudioEngine {
     timerUart::begin();
 #endif
     image = source; count = image->b(11); packetSize = packetIndex = scan = 0;
+    fadeThroughPending = false;
     for (uint8_t i = 0; i < count; ++i) {
       Player& p = players[i];
       p = Player{};
@@ -81,6 +144,8 @@ class AudioEngine {
   }
   void stop(uint32_t now) {
     // Finish a packet already in flight so subsequent STOP retains framing.
+    fadeThroughPending = false;
+    cancelUnsentStart();
     for (uint8_t i = 0; i < count; ++i) {
       Player& p = players[i]; p.track = 0; p.stage = 7; p.target = p.volume = 0;
       p.nextCommand = now;
@@ -88,6 +153,7 @@ class AudioEngine {
   }
   void enter(uint8_t stateIndex, uint32_t now) {
     if (!count || !image) return;
+    if (image->b(16) & 2) { requestFadeThrough(stateIndex, now); return; }
     const uint16_t state = image->state(stateIndex);
     const uint8_t foreground = static_cast<uint8_t>(image->u16(state + 2));
     const uint8_t ambient = static_cast<uint8_t>(image->u16(14));
@@ -129,6 +195,7 @@ class AudioEngine {
       if (!timingCritical && sendByte(packetPlayer, packet[packetIndex])) ++packetIndex;
       return;
     }
+    if (fadeThroughPending && readyForFadeThrough()) applyFadeThrough(now);
     for (uint8_t n = 0; n < count; ++n) {
       const uint8_t i = scan++ % count;
       Player& p = players[i];

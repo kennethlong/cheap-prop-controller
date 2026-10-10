@@ -35,7 +35,7 @@ struct SceneImage {
     const uint16_t length = u16(4);
     if (length < HeaderSize || length > capacity || b(8) != board) return false;
     if (b(9) > MaxOutputs || b(10) > MaxTriggers || b(11) > MaxPlayers || !b(12) || b(12) > MaxStates || b(13) >= b(12)) return false;
-    if (u16(14) > 255 || b(16) > 1 || b(18) > 30 || b(19)) return false;
+    if (u16(14) > 255 || (b(16) & ~3U) || b(18) > 30 || (!(b(16) & 2) && b(19))) return false;
     uint16_t offset = HeaderSize;
     if (u16(20) != offset) return false;
     offset += b(9) * 2;
@@ -98,8 +98,9 @@ struct SceneImage {
     }
     if (eventsSeen != totalEvents || transitionsSeen != totalTransitions) return false;
     uint8_t requiredPlayers = (hasForeground || u16(14)) ? 1 : 0;
-    if (hasForeground && u16(14) && (b(16) & 1)) requiredPlayers = b(17) && multipleForeground ? 3 : 2;
-    else if (hasForeground && b(17) && (u16(14) || multipleForeground)) requiredPlayers = 2;
+    const bool crossfade = !(b(16) & 2) && b(17);
+    if (hasForeground && u16(14) && (b(16) & 1)) requiredPlayers = crossfade && multipleForeground ? 3 : 2;
+    else if (hasForeground && crossfade && (u16(14) || multipleForeground)) requiredPlayers = 2;
     if (b(11) < requiredPlayers) return false;
     if (u16(state(b(13)) + 2)) return false; // The initial state is ambient only.
     return !checkCrc || crc(length) == u16(6);

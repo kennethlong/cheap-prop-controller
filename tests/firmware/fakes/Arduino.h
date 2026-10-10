@@ -5,9 +5,11 @@
 class HardwareSerial {
 public:
   std::vector<uint8_t> bytes;
+  std::vector<uint32_t> emittedAt;
+  uint32_t now = 0;
   void begin(unsigned long) {}
   int availableForWrite() const { return 64; }
-  size_t write(uint8_t byte) { bytes.push_back(byte); return 1; }
+  size_t write(uint8_t byte) { bytes.push_back(byte); emittedAt.push_back(now); return 1; }
 };
 extern HardwareSerial Serial1, Serial2, Serial3;
 #ifndef __AVR_ATmega2560__

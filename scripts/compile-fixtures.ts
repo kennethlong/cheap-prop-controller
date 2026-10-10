@@ -34,6 +34,21 @@ const compiledAudio = compileProject(synchronizeAudioPlayers(audioProject));
 if (!compiledAudio.bytes.length)
   throw new Error(JSON.stringify(compiledAudio.issues));
 await writeFile("artifacts/scenes/uno-audio.bin", compiledAudio.bytes);
+const singlePlayer = structuredClone(audioProject);
+singlePlayer.audio.keepAmbient = false;
+singlePlayer.audio.transitionMode = "fade-through";
+singlePlayer.audio.fadeOutMs = 150;
+singlePlayer.audio.fadeInMs = 350;
+const fadeProject = synchronizeAudioPlayers(singlePlayer);
+const compiledFade = compileProject(fadeProject);
+if (!compiledFade.bytes.length)
+  throw new Error(JSON.stringify(compiledFade.issues));
+await writeFile("artifacts/scenes/uno-fade-through.bin", compiledFade.bytes);
+if (process.argv.includes("--golden"))
+  await writeFile(
+    "tests/core/single-player-fade-scene.bin",
+    compiledFade.bytes,
+  );
 const dense = createDefaultProject();
 dense.states[2].events = Array.from({ length: 110 }, (_, index) => ({
   id: `dense-${index}`,
@@ -47,6 +62,11 @@ if (!denseImage.bytes.length)
 await writeFile("artifacts/scenes/uno-dense.bin", denseImage.bytes);
 if (process.argv.includes("--examples")) {
   await mkdir("examples", { recursive: true });
+  fadeProject.name = "Single-player fade transitions";
+  await writeFile(
+    "examples/single-player-fades-uno.cpc.json",
+    JSON.stringify(fadeProject, null, 2) + "\n",
+  );
   await writeFile(
     "examples/three-state-starter.cpc.json",
     JSON.stringify(createDefaultProject(), null, 2) + "\n",

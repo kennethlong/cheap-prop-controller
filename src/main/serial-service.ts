@@ -243,6 +243,10 @@ export class SerialService extends EventEmitter {
         throw new Error("Controller reported an invalid storage capacity");
       if (bytes.length > Number(hello.capacity))
         throw new Error("Scene exceeds controller storage");
+      if ((bytes[16] & 2) !== 0 && hello.audioFadeThrough !== true)
+        throw new Error(
+          "Install the updated firmware to use fade out / fade in. The saved controller scene has not been changed.",
+        );
       await this.request(`BEGIN ${bytes.length} ${bytes.readUInt16LE(6)}`);
       try {
         for (let offset = 0; offset < bytes.length; offset += 32) {

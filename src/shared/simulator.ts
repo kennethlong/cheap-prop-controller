@@ -1,5 +1,6 @@
 import type { SceneProject, SceneState } from "./model";
 import { parseProject, validateProject } from "./validation";
+import { resolveAudioTransition } from "./audio-settings";
 
 export interface AudioVoice {
   role: "ambient" | "foreground";
@@ -24,9 +25,15 @@ export interface SimulatorSnapshot {
 interface Voice extends AudioVoice {
   startedAt: number;
   fadeStartedAt: number;
+  fadeDurationMs: number;
   fadeFrom: number;
   targetVolume: number;
   stopWhenSilent: boolean;
+}
+type DesiredVoice = Pick<AudioVoice, "role" | "track" | "volume" | "loop">;
+interface PendingAudio {
+  desired: DesiredVoice[];
+  readyAt: number;
 }
 interface InputState {
   raw: boolean;
@@ -44,6 +51,7 @@ export class SceneSimulator {
   private remainder = 0;
   private running = true;
   private voices: Voice[] = [];
+  private pendingAudio: PendingAudio | null = null;
   private readonly inputs = new Map<string, InputState>();
 
   constructor(project: SceneProject) {
@@ -156,6 +164,7 @@ export class SceneSimulator {
 
   stop(): SimulatorSnapshot {
     this.running = false;
+    this.pendingAudio = null;
     this.voices = [];
     return this.snapshot();
   }
@@ -226,12 +235,24 @@ export class SceneSimulator {
   }
 
   private refreshVoices(): void {
-    const duration = this.project.audio.fadeMs;
+    if (this.pendingAudio && this.total >= this.pendingAudio.readyAt) {
+      const pending = this.pendingAudio;
+      this.pendingAudio = null;
+      this.installVoices(
+        pending.desired,
+        pending.readyAt,
+        resolveAudioTransition(this.project.audio).fadeInMs,
+        this.project.audio.keepAmbient,
+      );
+    }
     this.voices.forEach((voice) => {
       const progress =
-        duration === 0
+        voice.fadeDurationMs === 0
           ? 1
-          : Math.min(1, (this.total - voice.fadeStartedAt) / duration);
+          : Math.min(
+              1,
+              (this.total - voice.fadeStartedAt) / voice.fadeDurationMs,
+            );
       voice.volume =
         voice.fadeFrom + (voice.targetVolume - voice.fadeFrom) * progress;
     });
@@ -245,6 +266,49 @@ export class SceneSimulator {
     );
   }
 
+  /** Reuse resident ambient, but a new state always restarts its foreground. */
+  private installVoices(
+    desired: DesiredVoice[],
+    startedAt: number,
+    fadeDurationMs: number,
+    retainAmbient = true,
+  ): void {
+    const occupied = new Set<number>();
+    const retained = desired.map((item) => ({
+      item,
+      old:
+        retainAmbient && item.role === "ambient"
+          ? this.voices.find(
+              (voice) => voice.role === item.role && voice.track === item.track,
+            )
+          : undefined,
+    }));
+    retained.forEach(({ old }) => {
+      if (old) occupied.add(old.playerIndex);
+    });
+    this.voices = retained.map(({ item, old }) => {
+      const playerIndex =
+        old?.playerIndex ??
+        Array.from(
+          { length: this.project.audio.players.length },
+          (_, index) => index,
+        ).find((index) => !occupied.has(index))!;
+      occupied.add(playerIndex);
+      return {
+        ...item,
+        playerIndex,
+        volume: fadeDurationMs === 0 ? item.volume : 0,
+        positionMs: 0,
+        startedAt: old?.startedAt ?? startedAt,
+        fadeStartedAt: startedAt,
+        fadeDurationMs,
+        fadeFrom: fadeDurationMs === 0 ? item.volume : 0,
+        targetVolume: item.volume,
+        stopWhenSilent: false,
+      };
+    });
+  }
+
   private updateAudio(immediate: boolean): void {
     this.refreshVoices();
     const { audio } = this.project;
@@ -252,12 +316,8 @@ export class SceneSimulator {
       this.current.id === this.project.initialStateId
         ? null
         : this.current.foregroundTrack;
-    const desired: Array<{
-      role: "ambient" | "foreground";
-      track: number;
-      volume: number;
-      loop: boolean;
-    }> = [];
+    const transition = resolveAudioTransition(audio);
+    const desired: DesiredVoice[] = [];
     if (
       audio.ambientTrack !== null &&
       (foreground === null || audio.keepAmbient)
@@ -275,46 +335,42 @@ export class SceneSimulator {
         volume: this.current.volume,
         loop: this.current.loopAudio,
       });
-    const hardCut = immediate || audio.players.length < 2 || audio.fadeMs === 0;
+    if (!immediate && transition.mode === "fade-through") {
+      if (this.pendingAudio) {
+        // Trigger priority is immediate; only the newest audio target survives.
+        this.pendingAudio.desired = desired;
+      } else {
+        const duration = this.voices.some((voice) => voice.volume > 0)
+          ? transition.fadeOutMs
+          : 0;
+        this.pendingAudio = { desired, readyAt: this.total + duration };
+        this.voices.forEach((voice) => {
+          voice.fadeFrom = voice.volume;
+          voice.fadeStartedAt = this.total;
+          voice.fadeDurationMs = duration;
+          voice.targetVolume = 0;
+          voice.stopWhenSilent = !(
+            audio.keepAmbient && voice.role === "ambient"
+          );
+        });
+      }
+      this.refreshVoices();
+      return;
+    }
+    this.pendingAudio = null;
+    const hardCut =
+      immediate ||
+      transition.mode === "cut" ||
+      audio.players.length < 2 ||
+      transition.crossfadeMs === 0;
     if (hardCut) {
-      const occupied = new Set<number>();
-      const retained = desired.map((item) => ({
-        item,
-        old:
-          item.role === "ambient"
-            ? this.voices.find(
-                (voice) =>
-                  voice.role === item.role && voice.track === item.track,
-              )
-            : undefined,
-      }));
-      retained.forEach(({ old }) => {
-        if (old) occupied.add(old.playerIndex);
-      });
-      this.voices = retained.map(({ item, old }) => {
-        const playerIndex =
-          old?.playerIndex ??
-          Array.from(
-            { length: audio.players.length },
-            (_, index) => index,
-          ).find((index) => !occupied.has(index))!;
-        occupied.add(playerIndex);
-        return {
-          ...item,
-          playerIndex,
-          positionMs: 0,
-          startedAt: old?.startedAt ?? this.total,
-          fadeStartedAt: this.total,
-          fadeFrom: item.volume,
-          targetVolume: item.volume,
-          stopWhenSilent: false,
-        };
-      });
+      this.installVoices(desired, this.total, 0);
       return;
     }
     this.voices.forEach((voice) => {
       voice.fadeFrom = voice.volume;
       voice.fadeStartedAt = this.total;
+      voice.fadeDurationMs = transition.crossfadeMs;
       voice.targetVolume = 0;
       voice.stopWhenSilent = true;
     });
@@ -349,6 +405,7 @@ export class SceneSimulator {
           positionMs: 0,
           startedAt: this.total,
           fadeStartedAt: this.total,
+          fadeDurationMs: transition.crossfadeMs,
           fadeFrom: 0,
           targetVolume: item.volume,
           stopWhenSilent: false,

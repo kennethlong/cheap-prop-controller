@@ -18,6 +18,8 @@ $commands = @(
   'if not "%errorlevel%"=="0" exit /b %errorlevel%',
   ('"{0}\core_test.exe" "{1}\tests\core\mega-audio-scene.bin"' -f $artifactPath, $repoPath),
   'if not "%errorlevel%"=="0" exit /b %errorlevel%',
+  ('"{0}\core_test.exe" "{1}\tests\core\single-player-fade-scene.bin"' -f $artifactPath, $repoPath),
+  'if not "%errorlevel%"=="0" exit /b %errorlevel%',
   ('cl /nologo /EHsc /W4 /I "{0}\tests\firmware\fakes" /I "{0}\firmware\include" "{0}\tests\firmware\audio_test.cpp" /Fe:"{1}\audio_test.exe" /Fo:"{1}\audio_test.obj"' -f $repoPath, $artifactPath),
   'if not "%errorlevel%"=="0" exit /b %errorlevel%',
   ('"{0}\audio_test.exe"' -f $artifactPath),
