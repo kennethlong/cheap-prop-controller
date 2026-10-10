@@ -1,12 +1,12 @@
 import { _electron as electron, expect } from "@playwright/test";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 const source = process.argv[2];
 if (!source)
   throw new Error("Pass the path to a local MP3 for this desktop media test");
-const directory = path.resolve("artifacts/project-smoke");
-await mkdir(directory, { recursive: true });
+await mkdir("artifacts", { recursive: true });
+const directory = await mkdtemp(path.resolve("artifacts/project-smoke-"));
 const filename = path.join(directory, "portable-scene.cpc.json");
 const exportDirectory = path.join(directory, "card");
 await mkdir(exportDirectory, { recursive: true });
@@ -54,6 +54,10 @@ try {
   await expect(page.getByRole("status")).toContainText("Project saved");
   const project = JSON.parse(await readFile(filename, "utf8"));
   expect(path.isAbsolute(project.audio.tracks[0].path)).toBe(false);
+  expect(project.audio.tracks[0].path.replaceAll("\\", "/")).toMatch(
+    /^sounds\/[^/]+\.mp3$/,
+  );
+  expect((await stat(path.join(directory, "sounds"))).isDirectory()).toBe(true);
   const digest = (data) => createHash("sha256").update(data).digest("hex");
   const originalDigest = digest(await readFile(source));
   expect(
@@ -81,7 +85,7 @@ try {
   });
   await page.getByRole("button", { name: "Scene", exact: true }).click();
   await expect(
-    page.getByLabel("Audio waveform", { exact: true }),
+    page.getByLabel("Audio waveform", { exact: true }).first(),
   ).toBeVisible();
   await page.getByRole("button", { name: "Play preview", exact: true }).click();
   await expect(page.getByTestId("preview-state")).toHaveText("Idle");
@@ -95,13 +99,14 @@ try {
         passed: true,
         checks: [
           "Real MP3 decode",
-          "Relative project assets",
+          "Project sounds folder and relative MP3 path",
           "Media bytes preserved",
           "Numbered SD export",
           "New/open round trip",
           "Audio reload from saved relative path",
           "Waveform and muted playback",
         ],
+        directory,
         errors,
       },
       null,

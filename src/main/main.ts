@@ -133,9 +133,12 @@ handle("media:save-trimmed", async (track: MediaTrack) => {
         track.path,
       );
   const sourceName = path.parse(source).name;
+  const soundsDirectory = projects.currentPath
+    ? path.join(path.dirname(projects.currentPath), "sounds")
+    : path.dirname(source);
   const result = await dialog.showSaveDialog(window!, {
     title: "Save trimmed MP3",
-    defaultPath: path.join(path.dirname(source), `${sourceName}-trimmed.mp3`),
+    defaultPath: path.join(soundsDirectory, `${sourceName}-trimmed.mp3`),
     filters: [{ name: "MP3 audio", extensions: ["mp3"] }],
   });
   if (result.canceled || !result.filePath) return null;

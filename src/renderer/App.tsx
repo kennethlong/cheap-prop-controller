@@ -70,6 +70,12 @@ export function App() {
   const [position, setPosition] = useState(0);
   const [waveforms, setWaveforms] = useState<Record<number, number[]>>({});
   const [durations, setDurations] = useState<Record<number, number>>({});
+  // Saving relocates the same audio. Only replacing its content/project should
+  // remount a trim editor and discard its unapplied selection.
+  const [audioEditKeys, setAudioEditKeys] = useState<Record<number, number>>(
+    {},
+  );
+  const audioEditSequence = useRef(0);
   const [loaded, setLoaded] = useState(new Set<number>());
   const [saving, setSaving] = useState(false);
   const [mediaReload, setMediaReload] = useState(0);
@@ -159,6 +165,7 @@ export function App() {
     setHistory((old) => old.slice(0, -1));
     projectRef.current = previous;
     setProject(previous);
+    resetAudioEditors(previous);
     setDirty(true);
   };
   const redo = () => {
@@ -169,7 +176,18 @@ export function App() {
     setFuture((old) => old.slice(1));
     projectRef.current = next;
     setProject(next);
+    resetAudioEditors(next);
     setDirty(true);
+  };
+  const resetAudioEditors = (next: SceneProject) => {
+    setAudioEditKeys(
+      Object.fromEntries(
+        next.audio.tracks.map((track) => [
+          track.number,
+          ++audioEditSequence.current,
+        ]),
+      ),
+    );
   };
   const replaceProject = (next: SceneProject, nextPath = "") => {
     stopPreview();
@@ -179,6 +197,7 @@ export function App() {
     pendingAudioNumber.current = null;
     projectRef.current = next;
     setProject(next);
+    resetAudioEditors(next);
     setPath(nextPath);
     setDirty(false);
     setHistory([]);
@@ -195,7 +214,7 @@ export function App() {
     else action();
   };
   const save = async (saveAs = false) => {
-    if (saving) return;
+    if (saving) return false;
     setSaving(true);
     try {
       if (window.cpc) {
@@ -210,7 +229,9 @@ export function App() {
             projectRef.current = result.project;
             setProject(result.project);
             setDirty(false);
-            notify("Project saved, including its media references.");
+            notify(
+              "Project saved. Original audio and applied trims are in its sounds folder.",
+            );
           } else {
             const current = structuredClone(projectRef.current);
             current.audio.tracks.forEach((track) => {
@@ -220,8 +241,15 @@ export function App() {
               const saved = result.project.audio.tracks.find(
                 (item) => item.number === track.number,
               );
-              if (original && saved && track.path === original.path)
+              if (original && saved && track.path === original.path) {
                 track.path = saved.path;
+                if (
+                  track.trimStartMs === original.trimStartMs &&
+                  track.trimEndMs === original.trimEndMs
+                )
+                  track.trimmedPath = saved.trimmedPath;
+                else delete track.trimmedPath;
+              }
             });
             projectRef.current = current;
             setProject(current);
@@ -231,6 +259,7 @@ export function App() {
             );
           }
         }
+        return result !== null;
       } else {
         const blob = new Blob([JSON.stringify(projectRef.current, null, 2)], {
           type: "application/json",
@@ -246,9 +275,11 @@ export function App() {
         notify(
           "Project JSON downloaded. Browser audio files must be linked again when reopening.",
         );
+        return true;
       }
     } catch (error) {
       notify(`Could not save: ${errorText(error)}`, true);
+      return false;
     } finally {
       setSaving(false);
     }
@@ -532,6 +563,8 @@ export function App() {
     );
     const durationMs = Math.round(audio.current.duration(String(track.number)));
     const linked = { ...track, durationMs, trimStartMs: 0, trimEndMs: null };
+    const editKey = ++audioEditSequence.current;
+    setAudioEditKeys((old) => ({ ...old, [track.number]: editKey }));
     loadedPaths.current.set(
       track.number,
       track.path ?? `browser:${track.name}`,
@@ -652,10 +685,14 @@ export function App() {
     startMs: number,
     endMs: number,
   ) => {
+    if (!window.cpc) return;
+    const operation = mediaOperation.current;
+    if (!path && !(await save())) return;
+    if (operation !== mediaOperation.current) return;
     const track = projectRef.current.audio.tracks.find(
       (item) => item.number === number,
     );
-    if (!track || !window.cpc) return;
+    if (!track) return;
     audio.current.stopAudition();
     try {
       const result = await window.cpc.saveTrimmedAudio({
@@ -665,7 +702,7 @@ export function App() {
       });
       if (result)
         notify(
-          `Trimmed MP3 saved to ${result.path}. The original file was preserved.`,
+          `Trimmed MP3 saved to ${result.path}.${result.projectCopyPath ? " A copy is in the project's sounds folder." : " The original file was preserved."}`,
         );
     } catch (error) {
       notify(`Could not save trimmed MP3: ${errorText(error)}`, true);
@@ -1328,6 +1365,7 @@ export function App() {
             loaded={loaded}
             waveforms={waveforms}
             durations={durations}
+            audioEditKeys={audioEditKeys}
             onPreviewTrim={(number, startMs, endMs) =>
               void previewTrim(number, startMs, endMs)
             }

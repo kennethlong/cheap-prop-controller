@@ -56,54 +56,82 @@ export class ProjectStore {
   }
   async save(value: unknown, filename: string) {
     const project = structuredClone(parseProject(value));
-    const assetName = `${path.basename(filename, path.extname(filename))}.assets`;
-    const assetDirectory = path.join(path.dirname(filename), assetName);
+    const directory = path.dirname(filename);
+    const assetDirectory = path.join(directory, "sounds");
     // Immutable, content-addressed assets keep a failed save from changing audio
-    // referenced by the previous project. Preflight every source before writing.
-    const assets: Array<{
-      destination: string;
-      content: Buffer;
-      digest: string;
-    }> = [];
+    // referenced by the previous project. Read all originals, then stage every
+    // conversion before installing assets or replacing the project document.
+    const assets: AudioAsset[] = [];
+    const trims: Array<{ track: MediaTrack; original: AudioAsset }> = [];
     for (const track of project.audio.tracks) {
+      delete track.trimmedPath;
       if (!track.path) continue;
       const source = this.resolveAudio(track.path);
       if (!this.grantedAudio.has(source))
         throw new Error(
           `Import the audio file for track ${track.number} before saving`,
         );
-      if ((await stat(source)).size > 80_000_000)
+      if ((await accessFile(source)).size > 80_000_000)
         throw new Error(`Track ${track.number} exceeds the 80 MB media limit`);
       const content = await readFile(source);
-      const digest = createHash("sha256").update(content).digest("hex");
-      const destination = path.join(
+      const asset = audioAsset(
         assetDirectory,
-        `${String(track.number).padStart(3, "0")}-${digest}${path.extname(source).toLowerCase()}`,
+        String(track.number).padStart(3, "0"),
+        path.extname(source).toLowerCase(),
+        content,
       );
-      assets.push({ destination, content, digest });
-      track.path = `${assetName}/${path.basename(destination)}`;
-    }
-    if (assets.length) await mkdir(assetDirectory, { recursive: true });
-    for (const asset of assets) {
-      try {
-        await writeFile(asset.destination, asset.content, { flag: "wx" });
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        if (
-          createHash("sha256")
-            .update(await readFile(asset.destination))
-            .digest("hex") !== asset.digest
-        )
+      assets.push(asset);
+      track.path = `sounds/${path.basename(asset.destination)}`;
+      if ((track.trimStartMs ?? 0) > 0 || track.trimEndMs != null) {
+        if (path.extname(source).toLowerCase() !== ".mp3")
+          throw new Error("Trimmed project audio needs an imported MP3 file");
+        if (!this.options.ffmpegPath)
           throw new Error(
-            "A saved audio asset was modified outside the application. Choose Save As to preserve both versions.",
+            "The bundled audio encoder is missing; rebuild or reinstall the application",
           );
+        trims.push({ track, original: asset });
       }
-      this.grantedAudio.add(asset.destination);
     }
-    await mkdir(path.dirname(filename), { recursive: true });
-    const temporary = `${filename}.${process.pid}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(project, null, 2)}\n`, "utf8");
-    await rename(temporary, filename);
+    await mkdir(directory, { recursive: true });
+    const staging = await mkdtemp(path.join(directory, ".cpc-project-save-"));
+    try {
+      for (let index = 0; index < trims.length; index++) {
+        const { track, original } = trims[index];
+        const source = path.join(staging, `${index}-original.mp3`);
+        const temporaryClip = path.join(staging, `${index}-clip.mp3`);
+        await writeFile(source, original.content);
+        await exportTrimmedMp3({
+          ffmpegPath: this.options.ffmpegPath!,
+          source,
+          destination: temporaryClip,
+          startMs: track.trimStartMs ?? 0,
+          endMs: track.trimEndMs,
+        });
+        const clip = audioAsset(
+          assetDirectory,
+          `${String(track.number).padStart(3, "0")}-trim`,
+          ".mp3",
+          await readFile(temporaryClip),
+        );
+        assets.push(clip);
+        track.trimmedPath = `sounds/${path.basename(clip.destination)}`;
+      }
+      // Keep the folder present even for a scene with no imported audio yet.
+      await mkdir(assetDirectory, { recursive: true });
+      for (const asset of assets) await installAudioAsset(asset);
+      const temporary = path.join(staging, "project.json");
+      await writeFile(
+        temporary,
+        `${JSON.stringify(project, null, 2)}\n`,
+        "utf8",
+      );
+      await rename(temporary, filename);
+    } finally {
+      await removeStaging(staging, directory, ".cpc-project-save-");
+    }
+    for (const track of project.audio.tracks)
+      if (track.path)
+        this.grantedAudio.add(path.resolve(directory, track.path));
     this.currentPath = filename;
     return { project, path: filename };
   }
@@ -173,6 +201,7 @@ export class ProjectStore {
     const directory = path.dirname(destination);
     await mkdir(directory, { recursive: true });
     const staging = await mkdtemp(path.join(directory, ".cpc-audio-save-"));
+    let projectCopyPath: string | undefined;
     try {
       const temporary = path.join(staging, "clip.mp3");
       await exportTrimmedMp3({
@@ -182,11 +211,46 @@ export class ProjectStore {
         startMs: track.trimStartMs ?? 0,
         endMs: track.trimEndMs,
       });
+      const clipContent = await readFile(temporary);
+      // Generated names can be referenced by other saved scenes in the same
+      // folder. Only allow an identical re-export over an immutable asset.
+      const savedDigest = path
+        .basename(destination)
+        .match(/^\d{3}-(?:trim-)?([a-f0-9]{64})\.mp3$/i)?.[1];
+      if (
+        targetInfo &&
+        savedDigest &&
+        createHash("sha256").update(clipContent).digest("hex") !==
+          savedDigest.toLowerCase()
+      )
+        throw new Error(
+          "Choose a different clip filename; saved project sounds must not be overwritten",
+        );
+      if (this.currentPath) {
+        const sounds = path.join(path.dirname(this.currentPath), "sounds");
+        const clip = audioAsset(
+          sounds,
+          `${String(track.number).padStart(3, "0")}-trim`,
+          ".mp3",
+          clipContent,
+        );
+        await mkdir(sounds, { recursive: true });
+        if (path.resolve(directory) === path.resolve(sounds)) {
+          // The selected file already lives in sounds, so one copy is enough.
+          projectCopyPath = destination;
+        } else {
+          await installAudioAsset(clip);
+          projectCopyPath = clip.destination;
+        }
+      }
       await rename(temporary, destination);
     } finally {
       await removeStaging(staging, directory, ".cpc-audio-save-");
     }
-    return { path: destination };
+    return {
+      path: destination,
+      ...(projectCopyPath ? { projectCopyPath } : {}),
+    };
   }
   async exportMedia(value: unknown, directory: string) {
     const project: SceneProject = parseProject(value);
@@ -300,6 +364,39 @@ export class ProjectStore {
       await removeStaging(staging, directory, ".cpc-export-");
     }
     return { directory, files: sources.length };
+  }
+}
+interface AudioAsset {
+  destination: string;
+  content: Buffer;
+  digest: string;
+}
+function audioAsset(
+  directory: string,
+  prefix: string,
+  extension: string,
+  content: Buffer,
+): AudioAsset {
+  const digest = createHash("sha256").update(content).digest("hex");
+  return {
+    destination: path.join(directory, `${prefix}-${digest}${extension}`),
+    content,
+    digest,
+  };
+}
+async function installAudioAsset(asset: AudioAsset) {
+  try {
+    await writeFile(asset.destination, asset.content, { flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if (
+      createHash("sha256")
+        .update(await readFile(asset.destination))
+        .digest("hex") !== asset.digest
+    )
+      throw new Error(
+        "A saved audio asset was modified outside the application. Choose Save As to preserve both versions.",
+      );
   }
 }
 async function accessFile(filename: string) {

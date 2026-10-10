@@ -580,6 +580,7 @@ export function Media({
   loaded,
   waveforms,
   durations,
+  audioEditKeys,
   onPreviewTrim,
   onStopTrim,
   onSaveTrim,
@@ -592,6 +593,7 @@ export function Media({
   loaded: Set<number>;
   waveforms: Record<number, number[]>;
   durations: Record<number, number>;
+  audioEditKeys: Record<number, number>;
   onPreviewTrim(number: number, startMs: number, endMs: number): void;
   onStopTrim(): void;
   onSaveTrim?(number: number, startMs: number, endMs: number): Promise<void>;
@@ -796,6 +798,11 @@ export function Media({
               {project.audio.tracks.length} files
             </span>
           </div>
+          <p className="hint">
+            Saving the project copies original MP3s and applied trims into a
+            sounds folder beside the project file. Keep that folder with your
+            project when moving it to another computer.
+          </p>
           {project.audio.tracks.map((track) => (
             <Fragment key={track.number}>
               <div className="media-track">
@@ -861,6 +868,7 @@ export function Media({
               </div>
               {editingTrack === track.number && (
                 <AudioTrimEditor
+                  key={audioEditKeys[track.number] ?? 0}
                   track={track}
                   waveform={waveforms[track.number]}
                   durationMs={durations[track.number]}
@@ -873,6 +881,7 @@ export function Media({
                       if (!selected) return;
                       selected.trimStartMs = startMs;
                       selected.trimEndMs = endMs;
+                      delete selected.trimmedPath;
                       if (durations[track.number])
                         selected.durationMs = Math.round(
                           durations[track.number],

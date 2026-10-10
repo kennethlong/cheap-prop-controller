@@ -1,7 +1,14 @@
 import { _electron as electron, expect } from "@playwright/test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import ffmpegPath from "ffmpeg-static";
@@ -80,12 +87,14 @@ const checks = [];
 let screenshot;
 try {
   const version = await desktop.evaluate(({ app }) => app.getVersion());
-  expect(version).toBe("0.3.0");
+  expect(version).toBe("0.3.1");
   const page = await desktop.firstWindow();
   page.on("pageerror", (error) => errors.push(error.message));
   await desktop.evaluate(
     ({ dialog }, files) => {
       globalThis.__cpcTrimSaveDefaults = [];
+      globalThis.__cpcProjectSaveCalls = 0;
+      globalThis.__cpcCancelNextProjectSave = true;
       dialog.showOpenDialog = async (_window, options) => ({
         canceled: false,
         filePaths: [
@@ -99,6 +108,13 @@ try {
       dialog.showSaveDialog = async (_window, options) => {
         if (options.title === "Save trimmed MP3")
           globalThis.__cpcTrimSaveDefaults.push(options.defaultPath);
+        else {
+          globalThis.__cpcProjectSaveCalls += 1;
+          if (globalThis.__cpcCancelNextProjectSave) {
+            globalThis.__cpcCancelNextProjectSave = false;
+            return { canceled: true };
+          }
+        }
         return {
           canceled: false,
           filePath:
@@ -156,15 +172,57 @@ try {
     "Muted real Web Audio preview starts at 2 seconds for 2.5 seconds",
   );
   await page.getByRole("button", { name: /^Save trimmed MP3/ }).click();
+  await expect
+    .poll(() => desktop.evaluate(() => globalThis.__cpcProjectSaveCalls))
+    .toBe(1);
+  await expect(
+    page.getByRole("button", { name: /^Save trimmed MP3/ }),
+  ).toBeEnabled();
+  expect(
+    await desktop.evaluate(() => globalThis.__cpcTrimSaveDefaults.length),
+  ).toBe(0);
+  await expect(stat(filename)).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(stat(trimmed)).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(page.getByTestId("trim-duration")).toHaveText("2.500 s");
+  checks.push(
+    "Canceling the initial project save stops MP3 export and preserves the draft trim",
+  );
+  await page.getByRole("button", { name: /^Save trimmed MP3/ }).click();
   await expect(page.getByRole("status")).toContainText("Trimmed MP3 saved", {
     timeout: 30_000,
   });
   const savedDuration = await decodedDuration(trimmed);
   expect(Math.abs(savedDuration - 2.5)).toBeLessThan(0.002);
   expect(digest(await readFile(source))).toBe(originalDigest);
-  checks.push(
-    "Save trimmed MP3 creates an independently decodable 2.5 second file and preserves original",
+  const draftProject = JSON.parse(await readFile(filename, "utf8"));
+  const soundsDirectory = path.join(directory, "sounds");
+  expect((await stat(soundsDirectory)).isDirectory()).toBe(true);
+  expect(draftProject.audio.tracks[0].path.replaceAll("\\", "/")).toMatch(
+    /^sounds\/[^/]+\.mp3$/,
   );
+  expect(draftProject.audio.tracks[0].trimmedPath).toBeUndefined();
+  const draftSoundFiles = await readdir(soundsDirectory);
+  const draftSoundDurations = await Promise.all(
+    draftSoundFiles
+      .filter((name) => name.toLowerCase().endsWith(".mp3"))
+      .map((name) => decodedDuration(path.join(soundsDirectory, name))),
+  );
+  expect(
+    draftSoundDurations.some((duration) => Math.abs(duration - 2.5) < 0.002),
+  ).toBe(true);
+  checks.push(
+    "Save trimmed MP3 first saves the scene, keeps the draft clip in sounds, also writes the chosen external 2.5 second MP3, and preserves original",
+  );
+  await expect(
+    page.getByLabel("Trim start seconds", { exact: true }),
+  ).toHaveValue(/^2(?:\.0+)?$/);
+  await expect(
+    page.getByLabel("Trim end seconds", { exact: true }),
+  ).toHaveValue(/^4\.50*$/);
+  await expect(page.getByTestId("trim-duration")).toHaveText("2.500 s");
+  await expect(
+    page.getByRole("button", { name: "Apply trim", exact: true }),
+  ).toBeEnabled();
   await page.getByRole("button", { name: "Apply trim", exact: true }).click();
   await expect(
     page.getByRole("button", { name: "Apply trim", exact: true }),
@@ -180,11 +238,22 @@ try {
     durationMs: 8000,
   });
   expect(path.isAbsolute(project.audio.tracks[0].path)).toBe(false);
+  expect(project.audio.tracks[0].path.replaceAll("\\", "/")).toMatch(
+    /^sounds\/[^/]+\.mp3$/,
+  );
+  expect(project.audio.tracks[0].trimmedPath.replaceAll("\\", "/")).toMatch(
+    /^sounds\/[^/]+\.mp3$/,
+  );
+  expect(path.isAbsolute(project.audio.tracks[0].trimmedPath)).toBe(false);
+  const projectClipDuration = await decodedDuration(
+    path.join(directory, project.audio.tracks[0].trimmedPath),
+  );
+  expect(Math.abs(projectClipDuration - 2.5)).toBeLessThan(0.002);
   expect(
     digest(await readFile(path.join(directory, project.audio.tracks[0].path))),
   ).toBe(originalDigest);
   checks.push(
-    "Project saves clip bounds and retains full original portable audio asset",
+    "Project saves clip bounds with the full original and a playable 2.5 second trimmed MP3 under sounds",
   );
   await page
     .getByRole("button", { name: "Export files for MP3 cards", exact: true })
@@ -237,6 +306,7 @@ try {
   expect(path.relative(directory, reopenedDefaultPath).startsWith("..")).toBe(
     false,
   );
+  expect(path.dirname(reopenedDefaultPath)).toBe(soundsDirectory);
   expect(Math.abs((await decodedDuration(trimmed)) - 2.5)).toBeLessThan(0.002);
   expect(
     digest(await readFile(path.join(directory, project.audio.tracks[0].path))),
@@ -266,6 +336,8 @@ try {
         checks,
         savedDurationSeconds: savedDuration,
         cardDurationSeconds: cardDuration,
+        projectClipDurationSeconds: projectClipDuration,
+        soundsFiles: await readdir(soundsDirectory),
         errors,
         screenshot,
       },

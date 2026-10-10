@@ -117,6 +117,7 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
       number(track.number, `${path}.number`);
       text(track.name, `${path}.name`);
       text(track.path, `${path}.path`, true);
+      text(track.trimmedPath, `${path}.trimmedPath`, true);
       if (track.durationMs !== undefined)
         number(track.durationMs, `${path}.durationMs`);
       if (track.trimStartMs !== undefined)

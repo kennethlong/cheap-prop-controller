@@ -69,3 +69,16 @@ Application 0.3.0 adds per-track start/end selection, waveform handles, numeric 
 - The final packaged Windows application reports 0.3.0 and passes that same smoke test, including a second clip save from the reopened relative asset path. Both exports decode to exactly 2.500 seconds; there are no renderer errors. Screenshot inspected: `artifacts/desktop-trim-smoke.png`. The packaged encoder matches the prepared executable byte for byte.
 
 No controller, relay, sensor, audio module, or SD card was accessed during this update. Actual MP3-module encoder padding, startup delay, and audible behavior remain part of the hardware bench tests. macOS/Linux packaging has not been run on this Windows machine.
+
+## Project sounds folder — October 10, 2026
+
+Application 0.3.1 stores source audio and rendered applied trims in `sounds/` beside the scene JSON. `path` remains the full original; optional `trimmedPath` identifies the generated clip. Both are relative. Save As copies originals and renders the applied selections into the destination's sounds folder. Existing `.assets` projects copy their media on save while retaining the old files. Repeated saves retain stable filenames.
+
+**Save trimmed MP3** saves a new scene first, defaults to its sounds folder, and retains a local copy even when another destination is selected. Cancelling the initial scene-save dialog stops the clip export. Draft selections survive the source-path change when saving; importing replacement audio still resets the editor.
+
+- All 85 application tests and six browser workflows pass, with TypeScript, formatting, and production build checks passing.
+- Storage tests cover empty sounds folders, legacy migration, original byte preservation, real decoded trim duration, repeat saves, Save As, staging failures, and protection of previously saved sounds against overwrite.
+- Updated real Electron smoke tests verify cancellation, draft preservation during the first save, original and playable trimmed copies in sounds, separate export retention, SD export, and reopening relative paths. Evidence remains under ignored `artifacts/`.
+- The final packaged 0.3.1 Windows build passes the same checks without renderer errors. The standalone saved clip, project copy, and card export each decode to exactly 2.500 seconds; the eight-second original is unchanged. Screenshot inspected: `artifacts/desktop-trim-smoke.png`.
+
+The new Windows build is staged under `release/0.3.1/` so the existing running application can remain open. `Start Controller.cmd` selects the build matching `package.json`. No physical controller was accessed.

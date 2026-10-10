@@ -34,6 +34,8 @@ export interface MediaTrack {
   number: number;
   name: string;
   path?: string;
+  /** Project-local rendered copy of the applied trim; path stays the original. */
+  trimmedPath?: string;
   /** Source duration for editing; exports verify the actual audio file. */
   durationMs?: number;
   /** Non-destructive source range. Omitted/null end means end of file. */

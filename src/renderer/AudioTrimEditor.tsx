@@ -38,14 +38,7 @@ export function AudioTrimEditor({
   useEffect(() => {
     setStartText(seconds(track.trimStartMs ?? 0));
     setEndText(seconds(track.trimEndMs ?? duration));
-  }, [
-    track.number,
-    track.name,
-    track.path,
-    track.trimStartMs,
-    track.trimEndMs,
-    duration,
-  ]);
+  }, [track.number, track.name, track.trimStartMs, track.trimEndMs, duration]);
   useEffect(() => () => stopRef.current(), []);
 
   const start = Math.round(Number(startText) * 1000);
