@@ -17,7 +17,13 @@ const serial = new SerialService();
 const projectFolder = new ProjectFolder(
   process.env.CPC_TEST_SETTINGS_FILE ??
     path.join(app.getPath("userData"), "project-folder.json"),
-  app.getPath("documents"),
+  {
+    documentsDirectory: app.getPath("documents"),
+    appDirectory: app.getAppPath(),
+    isPackaged: app.isPackaged,
+    projectsDirectory: process.env.CPC_PROJECTS_DIRECTORY,
+    portableDirectory: process.env.PORTABLE_EXECUTABLE_DIR,
+  },
 );
 const toolsRoot = app.isPackaged
   ? path.join(process.resourcesPath, "tools")
@@ -109,7 +115,7 @@ handle("project:save", async (project: unknown, saveAs = false) => {
     const result = await dialog.showSaveDialog(window!, {
       title: "Save scene project",
       defaultPath:
-        filename ?? path.join(app.getPath("documents"), "My scene.cpc.json"),
+        filename ?? path.join(await projectFolder.get(), "My scene.cpc.json"),
       filters: [{ name: "Controller project", extensions: ["json"] }],
     });
     if (result.canceled || !result.filePath) return null;

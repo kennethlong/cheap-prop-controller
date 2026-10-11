@@ -4,21 +4,33 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 const source = process.argv[2];
 const executable = process.argv[3];
+// Pass the unpacked application EXE, not the NSIS bootstrap. Playwright needs
+// direct access to Electron's inspector output. --portable-env reproduces the
+// directory environment supplied by the portable bootstrap, in an isolated root.
+const portable = process.argv.includes("--portable-env");
 if (!source)
   throw new Error("Pass the path to a local MP3 for this desktop media test");
+if (portable && !executable)
+  throw new Error("Pass the unpacked EXE path when using --portable-env");
 await mkdir("artifacts", { recursive: true });
 const directory = await mkdtemp(path.resolve("artifacts/project-smoke-"));
 const filename = path.join(directory, "portable-scene.cpc.json");
 const exportDirectory = path.join(directory, "card");
 const settingsFile = path.join(directory, "project-folder.json");
+const defaultDirectory = portable
+  ? path.join(directory, "portable", "projects")
+  : path.join(directory, "projects");
 await mkdir(exportDirectory, { recursive: true });
 const launchOptions = {
+  timeout: 30_000,
   ...(executable ? { executablePath: path.resolve(executable) } : {}),
   args: executable ? ["--mute-audio"] : [".", "--mute-audio"],
   env: {
     ...process.env,
     CPC_TEST_HIDDEN: "1",
     CPC_TEST_SETTINGS_FILE: settingsFile,
+    CPC_PROJECTS_DIRECTORY: portable ? "" : defaultDirectory,
+    PORTABLE_EXECUTABLE_DIR: portable ? path.dirname(defaultDirectory) : "",
   },
 };
 const desktop = await electron.launch(launchOptions);
@@ -26,12 +38,27 @@ const page = await desktop.firstWindow();
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
 try {
+  const version = await desktop.evaluate(({ app }) => app.getVersion());
+  expect(version).toBe(
+    JSON.parse(await readFile("package.json", "utf8")).version,
+  );
+  if (portable)
+    expect(
+      await desktop.evaluate(() => process.env.PORTABLE_EXECUTABLE_DIR),
+    ).toBe(path.dirname(defaultDirectory));
   await desktop.evaluate(
     ({ dialog }, files) => {
       globalThis.__cpcProjectOpenDefaults = [];
+      globalThis.__cpcProjectSaveDefaults = [];
+      globalThis.__cpcCancelFirstOpen = true;
       dialog.showOpenDialog = async (_window, options) => {
-        if (options.title === "Open scene project")
+        if (options.title === "Open scene project") {
           globalThis.__cpcProjectOpenDefaults.push(options.defaultPath);
+          if (globalThis.__cpcCancelFirstOpen) {
+            globalThis.__cpcCancelFirstOpen = false;
+            return { canceled: true, filePaths: [] };
+          }
+        }
         return {
           canceled: false,
           filePaths: [
@@ -43,10 +70,10 @@ try {
           ],
         };
       };
-      dialog.showSaveDialog = async () => ({
-        canceled: false,
-        filePath: files.filename,
-      });
+      dialog.showSaveDialog = async (_window, options) => {
+        globalThis.__cpcProjectSaveDefaults.push(options.defaultPath);
+        return { canceled: false, filePath: files.filename };
+      };
       dialog.showMessageBox = async () => ({
         response: 0,
         checkboxChecked: false,
@@ -54,6 +81,13 @@ try {
     },
     { source: path.resolve(source), filename, exportDirectory },
   );
+  await page.getByRole("button", { name: "Open", exact: true }).click();
+  await expect
+    .poll(() =>
+      desktop.evaluate(() => globalThis.__cpcProjectOpenDefaults.at(-1)),
+    )
+    .toBe(defaultDirectory);
+  expect((await stat(defaultDirectory)).isDirectory()).toBe(true);
   await page
     .getByRole("navigation", { name: "Workspace" })
     .getByRole("button", { name: "Media", exact: true })
@@ -65,6 +99,9 @@ try {
   await page.getByLabel("Ambient track", { exact: true }).selectOption("1");
   await page.getByRole("button", { name: "Save project", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("Project saved");
+  expect(
+    await desktop.evaluate(() => globalThis.__cpcProjectSaveDefaults.at(-1)),
+  ).toBe(path.join(defaultDirectory, "My scene.cpc.json"));
   const project = JSON.parse(await readFile(filename, "utf8"));
   expect(path.isAbsolute(project.audio.tracks[0].path)).toBe(false);
   expect(project.audio.tracks[0].path.replaceAll("\\", "/")).toMatch(
@@ -175,6 +212,8 @@ try {
       {
         passed: true,
         checks: [
+          "First Open creates and uses the dedicated projects folder",
+          "First Save uses the same dedicated folder after audio import",
           "Real MP3 decode",
           "Project sounds folder and relative MP3 path",
           "Media bytes preserved",
@@ -189,6 +228,9 @@ try {
         executable: executable
           ? path.resolve(executable)
           : "development Electron",
+        version,
+        portableEnvironment: portable,
+        defaultDirectory,
         directory,
         errors,
       },

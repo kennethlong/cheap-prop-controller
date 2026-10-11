@@ -368,10 +368,11 @@ try {
       ...process.env,
       CPC_TEST_HIDDEN: "1",
       CPC_TEST_SETTINGS_FILE: settingsFile,
+      CPC_PROJECTS_DIRECTORY: path.join(directory, "projects"),
     },
   });
   evidence.version = await desktop.evaluate(({ app }) => app.getVersion());
-  expect(evidence.version).toBe("0.4.0");
+  expect(evidence.version).toBe("0.4.1");
   page = await desktop.firstWindow();
   page.on("pageerror", (error) => evidence.errors.push(error.message));
   await desktop.evaluate(({ BrowserWindow, dialog }, file) => {

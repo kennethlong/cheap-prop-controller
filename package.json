@@ -1,6 +1,6 @@
 {
   "name": "cheap-prop-controller",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "description": "A desktop scene editor and autonomous Arduino prop controller",
   "type": "module",
@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit",
     "package": "npm run build && electron-builder --dir",
     "package:portable": "npm run build && electron-builder --win portable",
+    "package:installer": "npm run build && electron-builder --win nsis --x64",
     "firmware:build": "node scripts/build-firmware.mjs",
     "prepare:resources": "node scripts/prepare-resources.mjs",
     "fixtures": "node scripts/make-fixtures.mjs",
@@ -45,6 +46,17 @@
     "win": {
       "target": "portable",
       "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "selectPerMachineByDefault": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": false,
+      "artifactName": "${productName} Setup ${version}.${ext}"
     },
     "mac": {
       "target": "dmg",

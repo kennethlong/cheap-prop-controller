@@ -4,7 +4,7 @@ A desktop scene editor and autonomous Arduino controller for relay-driven props,
 
 ## Run the application
 
-On this Windows machine, double-click **Start Controller.cmd**. It launches the packaged application when available, or the built Electron app otherwise. The portable build is in `release/`.
+On this Windows machine, double-click **Start Controller.cmd**. It launches the packaged application when available, or the built Electron app otherwise. Windows builds are in `release/`, including the portable app and **Cheap Prop Controller Setup 0.4.1.exe** in `release/0.4.1/`. The installer defaults to your user account, lets you select an installation folder, and creates Desktop and Start Menu shortcuts.
 
 The starter project has eight outputs, three button triggers, and Idle → Approach → Scare → Idle transitions. It contains no audio files and uses 172 bytes of scene storage. Opening the serial connection resets an Uno, which starts its saved initial state again.
 
@@ -18,7 +18,9 @@ The starter project has eight outputs, three button triggers, and Idle → Appro
 
 The device console exposes physical trigger injection and status. A physical trigger is an input to the currently uploaded project; preview and edited-but-not-uploaded settings do not change the controller.
 
-**Open** starts in the current scene's folder, or the last successfully opened/saved project folder after restarting. Importing or exporting audio does not change this location. On the first launch it uses Documents.
+**Open** starts in the current scene's folder, or the last successfully opened/saved project folder after restarting. Importing or exporting audio does not change this location. New scene saves use the same folder policy. On first use, **Start Controller.cmd** and development builds use `projects/` under this repository; the standalone portable EXE uses `projects/` beside itself. Other packaged builds, or a read-only portable location, use `Documents/Cheap Prop Controller/Projects`. The app creates the dedicated folder when needed. An old remembered Documents-root default switches to the new location; opening an existing scene there still works. Existing files are not moved; use **Save As** to relocate a scene and its sounds.
+
+Installed copies keep projects in `Documents/Cheap Prop Controller/Projects` by default, outside the installation folder that is replaced or removed during upgrades/uninstall. Uninstall keeps the app's preferences and external scene folders. Avoid saving projects in the installed program directory. For custom launchers, set the absolute `CPC_PROJECTS_DIRECTORY` environment variable to choose a default project library. A remembered project folder still takes precedence.
 
 Three editable projects are in `examples/`: the eight-output starter, an Uno scene with single-player fade transitions, and a Mega scene with PIR, HC-SR04, reset button, and three audio players. The audio examples have numbered track slots without included MP3s; use each track's **Replace / link file** action in Media to attach your files while preserving state assignments.
 
@@ -94,6 +96,7 @@ npm run firmware:build
 .\.tools\pio\Scripts\platformio.exe pkg install --global --tool platformio/tool-avrdude@1.80100.0
 npm run prepare:resources
 npm run package:portable
+npm run package:installer
 ```
 
 On macOS/Linux use `.tools/pio/bin/python` and `.tools/pio/bin/platformio`. Build the application and prepare resources on the target operating system so the uploader and native serial module match it. Packaging targets for macOS/Linux are configured; their installers and physical USB behavior have not been tested on this Windows machine.

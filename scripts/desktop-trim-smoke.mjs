@@ -84,6 +84,7 @@ const desktop = await electron.launch({
     ...process.env,
     CPC_TEST_HIDDEN: visible ? "0" : "1",
     CPC_TEST_SETTINGS_FILE: path.join(directory, "project-folder.json"),
+    CPC_PROJECTS_DIRECTORY: path.join(directory, "projects"),
   },
 });
 const errors = [];
@@ -91,7 +92,7 @@ const checks = [];
 let screenshot;
 try {
   const version = await desktop.evaluate(({ app }) => app.getVersion());
-  expect(version).toBe("0.4.0");
+  expect(version).toBe("0.4.1");
   const page = await desktop.firstWindow();
   page.on("pageerror", (error) => errors.push(error.message));
   await desktop.evaluate(
