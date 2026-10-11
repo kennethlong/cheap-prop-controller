@@ -19,6 +19,15 @@ export interface AudioVoice {
   positionMs: number;
   loop: boolean;
 }
+/** Logical command invocation; desktop preview never transmits physical IR. */
+export interface IrActivity {
+  sequence: number;
+  commandId: string;
+  name: string;
+  atMs: number;
+  stateId: string;
+  source: "timeline" | "zone";
+}
 export interface SimulatorSnapshot {
   stateId: string;
   stateName: string;
@@ -29,6 +38,7 @@ export interface SimulatorSnapshot {
   foregroundTrack: number | null;
   ambientTrack: number | null;
   audio: AudioVoice[];
+  irActivity: IrActivity[];
   distances: Record<
     string,
     {
@@ -81,6 +91,9 @@ export class SceneSimulator {
   private running = true;
   private voices: Voice[] = [];
   private pendingAudio: PendingAudio | null = null;
+  private irActivity: IrActivity[] = [];
+  private irSequence = 0;
+  private stateEpoch = 0;
   private readonly inputs = new Map<string, InputState>();
   private readonly distances = new Map<string, DistanceState>();
 
@@ -117,6 +130,7 @@ export class SceneSimulator {
         });
       });
     this.updateAudio(true);
+    this.fireTimelineIr(-1, 0);
   }
 
   advance(milliseconds: number): SimulatorSnapshot {
@@ -127,6 +141,11 @@ export class SceneSimulator {
     while (this.remainder >= 50) {
       this.remainder -= 50;
       this.total += 50;
+      const previousElapsed = this.elapsed;
+      const epoch = this.stateEpoch;
+      const wraps =
+        this.current.loopTimeline &&
+        this.elapsed + 50 >= this.current.durationMs;
       this.elapsed += 50;
       if (this.current.loopTimeline) this.elapsed %= this.current.durationMs;
       else this.elapsed = Math.min(this.elapsed, this.current.durationMs);
@@ -150,6 +169,14 @@ export class SceneSimulator {
       this.project.triggers.forEach((trigger) => {
         if (isZonedTrigger(trigger)) this.sampleZones(trigger);
       });
+      // Input/state actions take priority. Entering another state already fired
+      // its tick-zero cues and cancels the previous state's due commands.
+      if (epoch === this.stateEpoch) {
+        if (wraps) {
+          this.fireTimelineIr(previousElapsed, this.current.durationMs - 1);
+          this.fireTimelineIr(-1, this.elapsed);
+        } else this.fireTimelineIr(previousElapsed, this.elapsed);
+      }
       this.refreshVoices();
     }
     return this.snapshot();
@@ -217,6 +244,7 @@ export class SceneSimulator {
   reset(): SimulatorSnapshot {
     this.running = true;
     this.remainder = 0;
+    this.irActivity = [];
     this.distances.forEach((distance) => {
       distance.baselined = false;
       distance.zoneId = null;
@@ -286,6 +314,7 @@ export class SceneSimulator {
           loop,
         }),
       ),
+      irActivity: this.irActivity.map((entry) => ({ ...entry })),
       distances: Object.fromEntries(
         this.project.triggers
           .filter((trigger) => trigger.kind === "ultrasonic")
@@ -319,9 +348,37 @@ export class SceneSimulator {
   }
 
   private enter(stateId: string): void {
+    this.stateEpoch++;
     this.current = this.project.states.find((state) => state.id === stateId)!;
     this.elapsed = 0;
     this.updateAudio(false);
+    this.fireTimelineIr(-1, 0);
+  }
+
+  private recordIr(commandId: string, source: IrActivity["source"]): void {
+    if (!this.running || !this.project.ir?.enabled) return;
+    const command = this.project.ir.commands.find(
+      (item) => item.id === commandId,
+    );
+    if (!command) return;
+    this.irActivity.push({
+      sequence: ++this.irSequence,
+      commandId,
+      name: command.name,
+      atMs: this.total,
+      stateId: this.current.id,
+      source,
+    });
+    if (this.irActivity.length > 32)
+      this.irActivity.splice(0, this.irActivity.length - 32);
+  }
+
+  private fireTimelineIr(afterMs: number, throughMs: number): void {
+    for (const event of [...(this.current.irEvents ?? [])].sort(
+      (a, b) => a.atMs - b.atMs,
+    ))
+      if (event.atMs > afterMs && event.atMs <= throughMs)
+        this.recordIr(event.commandId, "timeline");
   }
 
   private sampleZones(trigger: TriggerConfig): void {
@@ -367,6 +424,7 @@ export class SceneSimulator {
   private applyZoneActions(actions: ZoneAction[]): void {
     actions.forEach((action) => {
       if (action.kind === "state") this.enter(action.stateId);
+      else if (action.kind === "ir") this.recordIr(action.commandId, "zone");
       else this.setRoleVolume(action.target, action.volume, action.fadeMs);
     });
   }

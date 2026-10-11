@@ -1178,6 +1178,75 @@ a {
   border-color: #86616b;
   color: #ffccd3;
 }
+.ir-library {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ir-library > label.checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.ir-command-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 14px;
+}
+.ir-command {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.ir-draft {
+  border-color: #7cafa0;
+  background: #20332c;
+}
+.ir-learning-message {
+  padding: 12px;
+  border-radius: 6px;
+  background: #253346;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.ir-lane {
+  background: #232134;
+}
+.ir-point {
+  position: absolute;
+  top: 6px;
+  padding: 4px 7px;
+  gap: 6px;
+  height: 28px;
+  white-space: nowrap;
+  background: #473958;
+  border: 1px solid #bf92dc;
+  color: #ead3fc;
+  z-index: 2;
+  max-width: 180px;
+  overflow: hidden;
+}
+.ir-point.selected {
+  outline: 2px solid #e7c5ff;
+  outline-offset: 1px;
+}
+.ir-point span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.preview-ir-log {
+  flex-basis: 100%;
+  padding: 10px;
+  border: 1px solid #514362;
+  border-radius: 6px;
+  color: #dfc9f2;
+  font-size: 11px;
+  line-height: 1.7;
+}
 .browser-note {
   background: #252b3f;
   color: #abbce7;

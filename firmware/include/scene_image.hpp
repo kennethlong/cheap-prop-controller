@@ -18,6 +18,13 @@ struct SceneImage {
   uint16_t transitionEnd() const { return hasZones() ? u16(zoneFooter() + 6) : u16(4); }
   uint16_t zone(uint8_t index) const { return transitionEnd() + index * 10; }
   uint16_t zoneAction(uint8_t index) const { return transitionEnd() + zoneCount() * 10 + index * 6; }
+  bool hasIr() const { return hasZones() && u16(4) >= HeaderSize + 16 && b(zoneFooter() + 2) == 2; }
+  uint16_t irFooter() const { return zoneFooter() - 8; }
+  uint8_t irCommandCount() const { return hasIr() ? b(irFooter() + 2) : 0; }
+  uint16_t irTimedCount() const { return hasIr() ? u16(irFooter() + 4) : 0; }
+  uint16_t irTimed(uint16_t i) const { return zoneAction(static_cast<uint8_t>(actionCount())) + i * 4; }
+  uint16_t irCommand(uint8_t i) const { return irTimed(irTimedCount()) + i * 12; }
+  uint16_t irRaw() const { return irCommand(irCommandCount()); }
   bool zonedTrigger(uint8_t index) const {
     for (uint8_t i = 0; i < zoneCount(); ++i) if (b(zone(i)) == index) return true;
     return false;
@@ -52,8 +59,16 @@ struct SceneImage {
     if (hasZones()) {
       if (length < HeaderSize + 8) return false;
       const uint16_t footer = zoneFooter();
-      if (b(footer) != 'Z' || b(footer + 1) != 'N' || b(footer + 2) != 1 || !zoneCount() || zoneCount() > MaxZones || actionCount() > MaxZoneActions) return false;
-      if (transitionEnd() < HeaderSize || transitionEnd() > footer || static_cast<uint32_t>(transitionEnd()) + zoneCount() * 10U + actionCount() * 6U != footer) return false;
+      if (b(footer) != 'Z' || b(footer + 1) != 'N' || (b(footer + 2) != 1 && b(footer + 2) != 2) || zoneCount() > MaxZones || actionCount() > MaxZoneActions) return false;
+      uint32_t end = static_cast<uint32_t>(transitionEnd()) + zoneCount() * 10U + actionCount() * 6U;
+      if (b(footer + 2) == 1) { if (!zoneCount() || end != footer) return false; }
+      else {
+        if (!hasIr() || irCommandCount() > 32 || irTimedCount() > 128 || b(irFooter() + 3)) return false;
+        if (b(irFooter()) != (board == 4 ? 11 : 9) || b(irFooter() + 1) != 2) return false;
+        end += irTimedCount() * 4U + irCommandCount() * 12U + u16(irFooter() + 6);
+        if (end != irFooter()) return false;
+      }
+      if (transitionEnd() < HeaderSize || transitionEnd() > footer) return false;
     }
     uint16_t offset = HeaderSize;
     if (u16(20) != offset) return false;
@@ -66,6 +81,7 @@ struct SceneImage {
     offset += b(12) * 16;
     if (u16(28) != offset || offset > transitionEnd() || u16(30) < offset || u16(30) > transitionEnd() || (u16(30) - offset) % 6 || (transitionEnd() - u16(30)) % 2) return false;
     uint8_t used[9] = {0};
+    if (hasIr() && (!claimPin(b(irFooter()), board, used) || !claimPin(b(irFooter() + 1), board, used))) return false;
     for (uint8_t i = 0; i < b(9); ++i) {
       const uint16_t p = output(i);
       if (b(p + 1) > 3 || !claimPin(b(p), board, used)) return false;
@@ -136,7 +152,30 @@ struct SceneImage {
         if (b(a + 1) >= b(12) || u16(a + 2) || u16(a + 4)) return false;
       } else if (b(a) == 1) {
         if (b(a + 1) > 1 || u16(a + 2) > 30 || u16(a + 4) > 255) return false;
+      } else if (b(a) == 2) {
+        if (!hasIr() || b(a + 1) >= irCommandCount() || u16(a + 2) || u16(a + 4)) return false;
       } else return false;
+    }
+    if (hasIr()) {
+      uint16_t rawSeen = 0;
+      for (uint8_t i = 0; i < irCommandCount(); ++i) {
+        const uint16_t c = irCommand(i);
+        if (b(c) > 1 || b(c + 1) != 38 || !b(c + 2) || b(c + 2) > 10 || b(c + 3) || u16(c + 10) || u16(c + 8) < 50 || u16(c + 8) > 2000 || u16(c + 8) % 50) return false;
+        if (b(c) == 1) {
+          const uint16_t count = u16(c + 6);
+          if (u16(c + 4) != rawSeen || count < 5 || count > 127 || !(count & 1) || count > u16(irFooter() + 6) - rawSeen) return false;
+          uint16_t ticks = 0;
+          for (uint8_t j = 0; j < count; ++j) { const uint8_t value = b(irRaw() + rawSeen + j); if (value < 2) return false; ticks += value; }
+          if (ticks > 4000) return false;
+          rawSeen += count;
+        }
+      }
+      if (rawSeen != u16(irFooter() + 6)) return false;
+      for (uint16_t i = 0; i < irTimedCount(); ++i) {
+        const uint16_t t = irTimed(i);
+        if (b(t) >= b(12) || b(t + 1) >= irCommandCount() || u16(t + 2) >= u16(state(b(t)))) return false;
+        if (i) { const uint16_t prev = irTimed(i - 1); if (b(t) < b(prev) || (b(t) == b(prev) && u16(t + 2) < u16(prev + 2))) return false; }
+      }
     }
     uint8_t requiredPlayers = (hasForeground || u16(14)) ? 1 : 0;
     const bool crossfade = !(b(16) & 2) && b(17);

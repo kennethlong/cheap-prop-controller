@@ -22,6 +22,9 @@ export const BINARY = {
   zone: 10,
   zoneAction: 6,
   zoneFooter: 8,
+  irDescriptor: 8,
+  irCommand: 12,
+  irEvent: 4,
 } as const;
 export const BOARD_CODES: Record<BoardId, number> = {
   uno: 1,
@@ -83,6 +86,7 @@ export function compileProject(project: SceneProject): CompiledScene {
       ? (trigger.zones ?? []).map((zone) => ({ triggerIndex, zone }))
       : [],
   );
+  const ir = project.ir?.enabled ? project.ir : undefined;
   bytes.set([0x43, 0x50, 0x43, 0x31]);
   u16(4, usedBytes);
   bytes[8] = BOARD_CODES[project.board];
@@ -100,7 +104,7 @@ export function compileProject(project: SceneProject): CompiledScene {
     (project.audio.keepAmbient ? 1 : 0) |
     (sequential ? 2 : 0) |
     (resolveAmbientMixVolume(project.audio) << 2) |
-    (zones.length ? 0x80 : 0);
+    (zones.length || ir ? 0x80 : 0);
   bytes[17] = (sequential ? transition.fadeInMs : transition.crossfadeMs) / 50;
   bytes[18] = project.audio.ambientVolume;
   bytes[19] = sequential ? transition.fadeOutMs / 50 : 0;
@@ -172,7 +176,7 @@ export function compileProject(project: SceneProject): CompiledScene {
       );
     });
   });
-  if (zones.length) {
+  if (zones.length || ir) {
     const zoneOffset = transitionOffset + transitionIndex * BINARY.transition;
     const actionOffset = zoneOffset + zones.length * BINARY.zone;
     let actionIndex = 0;
@@ -189,10 +193,15 @@ export function compileProject(project: SceneProject): CompiledScene {
         bytes[offset + 7 + edgeIndex * 2] = zone[edge].length;
         for (const action of zone[edge]) {
           const record = actionOffset + actionIndex++ * BINARY.zoneAction;
-          bytes[record] = action.kind === "state" ? 0 : 1;
+          bytes[record] =
+            action.kind === "state" ? 0 : action.kind === "volume" ? 1 : 2;
           if (action.kind === "state") {
             bytes[record + 1] = project.states.findIndex(
               (state) => state.id === action.stateId,
+            );
+          } else if (action.kind === "ir") {
+            bytes[record + 1] = ir!.commands.findIndex(
+              (command) => command.id === action.commandId,
             );
           } else {
             bytes[record + 1] = action.target === "ambient" ? 0 : 1;
@@ -202,8 +211,52 @@ export function compileProject(project: SceneProject): CompiledScene {
         }
       }
     });
+    if (ir) {
+      const events = project.states.flatMap((state, stateIndex) =>
+        [...(state.irEvents ?? [])]
+          .sort((a, b) => a.atMs - b.atMs)
+          .map((event) => ({ stateIndex, event })),
+      );
+      const irEventOffset = actionOffset + actionIndex * BINARY.zoneAction;
+      events.forEach(({ stateIndex, event }, index) => {
+        const record = irEventOffset + index * BINARY.irEvent;
+        bytes[record] = stateIndex;
+        bytes[record + 1] = ir.commands.findIndex(
+          (command) => command.id === event.commandId,
+        );
+        u16(record + 2, event.atMs / 50);
+      });
+      const directory = irEventOffset + events.length * BINARY.irEvent;
+      const rawOffset = directory + ir.commands.length * BINARY.irCommand;
+      let rawCount = 0;
+      ir.commands.forEach((command, index) => {
+        const record = directory + index * BINARY.irCommand;
+        bytes[record] = command.signal.kind === "nec" ? 0 : 1;
+        bytes[record + 1] = 38;
+        bytes[record + 2] = command.sendCount;
+        u16(record + 8, command.gapMs);
+        if (command.signal.kind === "nec") {
+          u16(record + 4, command.signal.code & 0xffff);
+          u16(record + 6, command.signal.code >>> 16);
+        } else {
+          u16(record + 4, rawCount);
+          u16(record + 6, command.signal.pulsesUs.length);
+          bytes.set(
+            command.signal.pulsesUs.map((pulse) => pulse / 50),
+            rawOffset + rawCount,
+          );
+          rawCount += command.signal.pulsesUs.length;
+        }
+      });
+      const descriptor = usedBytes - 16;
+      bytes[descriptor] = ir.txPin!;
+      bytes[descriptor + 1] = ir.rxPin!;
+      bytes[descriptor + 2] = ir.commands.length;
+      u16(descriptor + 4, events.length);
+      u16(descriptor + 6, rawCount);
+    }
     const footer = usedBytes - BINARY.zoneFooter;
-    bytes.set([0x5a, 0x4e, 1, zones.length], footer);
+    bytes.set([0x5a, 0x4e, ir ? 2 : 1, zones.length], footer);
     u16(footer + 4, actionIndex);
     u16(footer + 6, zoneOffset);
   }

@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   compileProject,
   createDefaultProject,
+  encodeIrPulses,
   synchronizeAudioPlayers,
+  type IrCommand,
 } from "../../src/shared";
 
 interface FakePort {
@@ -75,9 +77,396 @@ vi.mock("serialport", async () => {
   };
 });
 
+const hello = { type: "hello", protocol: 1, board: "uno", capacity: 1024 };
+const irHello = { ...hello, irLearning: true, irReplay: true };
+const irCommand = (raw = false): IrCommand => ({
+  id: "candle-on",
+  name: "Candle on",
+  signal: raw
+    ? {
+        kind: "raw",
+        pulsesUs: Array.from({ length: 35 }, (_, index) =>
+          index % 2 ? 1000 : 500,
+        ),
+      }
+    : { kind: "nec", code: 0xff00aa55 },
+  sendCount: 2,
+  gapMs: 150,
+});
+
+describe("IR learning and RAM tests", () => {
+  it("reports the current connection and capability snapshot without serial traffic", async () => {
+    const { service, port } = await connected();
+    expect(service.getDeviceStatus()).toEqual({
+      connected: true,
+      port: "MOCK",
+      hello,
+    });
+    const writes = port.writes.length;
+    const updates: unknown[] = [];
+    service.on("status", (status) => updates.push(status));
+    port.reply(irHello);
+    expect(service.getDeviceStatus()).toEqual({
+      connected: true,
+      port: "MOCK",
+      hello: irHello,
+    });
+    expect(updates.at(-1)).toEqual(service.getDeviceStatus());
+    expect(port.writes).toHaveLength(writes);
+    await service.disconnect();
+    expect(service.getDeviceStatus()).toEqual({ connected: false });
+  });
+
+  it("waits for a complete capture, decodes NEC, and leaves the controller stopped", async () => {
+    const { service, port } = await connected();
+    port.onWrite = (command) => {
+      if (command === "HELLO") port.reply(irHello);
+      if (command === "IRLEARN")
+        port.reply({ type: "ack", command: "IRLEARN" });
+    };
+    let finished = false;
+    const learning = service.learnIr().then((signal) => {
+      finished = true;
+      return signal;
+    });
+    await flush();
+    expect(port.writes.at(-1)).toBe("IRLEARN");
+    expect(finished).toBe(false);
+    const signal = { kind: "nec" as const, code: 0xff00aa55 };
+    port.reply({ type: "ir-capture", pulsesUs: encodeIrPulses(signal) });
+    expect(await learning).toEqual(signal);
+    expect(port.writes).not.toContain("RUN");
+    expect(port.writes.some((command) => command.startsWith("BEGIN "))).toBe(
+      false,
+    );
+    await service.disconnect();
+  });
+
+  it("normalizes supported raw captures without assuming they are NEC", async () => {
+    const { service, port } = await connected();
+    port.onWrite = (command) => {
+      if (command === "HELLO") port.reply(irHello);
+      if (command === "IRLEARN")
+        port.reply({
+          type: "ir-capture",
+          pulsesUs: [2010, 920, 470, 610, 510],
+        });
+    };
+    const learning = service.learnIr();
+    await flush();
+    expect(await learning).toEqual({
+      kind: "raw",
+      pulsesUs: [2000, 900, 450, 600, 500],
+    });
+    await service.disconnect();
+  });
+
+  it.each([
+    undefined,
+    [],
+    [500, 500],
+    [100000, 500, 500, 500, 500],
+    [500, "500", 500, 500, 500],
+  ])(
+    "rejects malformed capture %s and performs STOP cleanup",
+    async (pulsesUs) => {
+      const { service, port } = await connected();
+      port.onWrite = (command) => {
+        if (command === "HELLO") port.reply(irHello);
+        if (command === "IRLEARN") port.reply({ type: "ir-capture", pulsesUs });
+        if (command === "STOP") port.reply({ type: "ack", command: "STOP" });
+      };
+      const learning = failure(service.learnIr());
+      await flush();
+      expect(await learning).toBeInstanceOf(Error);
+      expect(port.writes.at(-1)).toBe("STOP");
+      expect(port.writes).not.toContain("RUN");
+      await service.disconnect();
+    },
+  );
+
+  it("cleans up a timed-out learning request and never implicitly runs the scene", async () => {
+    const { service, port } = await connected();
+    port.onWrite = (command) => {
+      if (command === "HELLO") port.reply(irHello);
+      if (command === "STOP") port.reply({ type: "ack", command: "STOP" });
+    };
+    const learning = failure(service.learnIr());
+    await flush();
+    await vi.advanceTimersByTimeAsync(15999);
+    expect(port.writes.at(-1)).toBe("IRLEARN");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(String(await learning)).toContain("did not respond to IRLEARN");
+    expect(port.writes.at(-1)).toBe("STOP");
+    expect(port.writes).not.toContain("RUN");
+    await service.disconnect();
+  });
+
+  it("cancels learning and queued work immediately, ignoring late captures while STOP waits", async () => {
+    const { service, port } = await connected();
+    port.onWrite = (command) => {
+      if (command === "HELLO") port.reply(irHello);
+    };
+    const learning = failure(service.learnIr());
+    const queued = failure(service.command("RESET"));
+    await flush();
+    const stopping = service.cancelIr();
+    await flush();
+    expect(await learning).toBeInstanceOf(Error);
+    expect(await queued).toBeInstanceOf(Error);
+    expect(port.writes.at(-1)).toBe("STOP");
+    let finished = false;
+    void stopping.then(() => {
+      finished = true;
+    });
+    port.reply({
+      type: "ir-capture",
+      pulsesUs: encodeIrPulses(irCommand().signal),
+    });
+    port.reply({ type: "error", message: "late capture failure" });
+    await flush();
+    expect(finished).toBe(false);
+    port.reply({ type: "ack", command: "STOP" });
+    await stopping;
+    expect(port.writes.filter((command) => command === "STOP")).toHaveLength(1);
+    expect(port.writes).not.toContain("RESET");
+    await service.disconnect();
+  });
+
+  it("cancels learning on disconnect without sending cleanup to a closed session", async () => {
+    const { service, port } = await connected();
+    port.onWrite = (command) => {
+      if (command === "HELLO") port.reply(irHello);
+    };
+    const learning = failure(service.learnIr());
+    await flush();
+    await service.disconnect();
+    expect(await learning).toBeInstanceOf(Error);
+    expect(port.writes.at(-1)).toBe("IRLEARN");
+    expect(port.isOpen).toBe(false);
+  });
+
+  it.each([undefined, false, "true"])(
+    "requires explicit capabilities for learning and RAM tests (%s)",
+    async (value) => {
+      const { service, port } = await connected();
+      port.onWrite = () =>
+        port.reply({ ...hello, irLearning: value, irReplay: value });
+      const learning = failure(service.learnIr());
+      await flush();
+      expect(String(await learning)).toContain("updated firmware");
+      const testing = failure(service.testIr(irCommand()));
+      await flush();
+      expect(String(await testing)).toContain("updated firmware");
+      expect(port.writes.every((command) => command === "HELLO")).toBe(true);
+      await service.disconnect();
+    },
+  );
+
+  it("sends a NEC RAM command without any EEPROM writes or raw payload", async () => {
+    const { service, port } = await connected();
+    port.onWrite = (command) => {
+      if (command === "HELLO") port.reply(irHello);
+      else port.reply({ type: "ack", command: command.split(" ")[0] });
+    };
+    const testing = service.testIr(irCommand());
+    await flush();
+    expect(await testing).toEqual({ type: "ack", command: "IRPLAY" });
+    expect(port.writes.slice(-2)).toEqual([
+      "IRBEGIN 0 0 2 150 4278233685",
+      "IRPLAY",
+    ]);
+    expect(
+      port.writes.some((command) =>
+        /^(BEGIN|DATA|COMMIT|RUN)( |$)/.test(command),
+      ),
+    ).toBe(false);
+    await service.disconnect();
+  });
+
+  it("sends raw 50us bytes in bounded contiguous acknowledged chunks", async () => {
+    const { service, port } = await connected();
+    port.onWrite = (command) => {
+      if (command === "HELLO") port.reply(irHello);
+      else if (command.startsWith("IRDATA ")) {
+        const [, offset, hex] = command.split(" ");
+        port.reply({
+          type: "ack",
+          command: "IRDATA",
+          offset: Number(offset) + hex.length / 2,
+        });
+      } else port.reply({ type: "ack", command: command.split(" ")[0] });
+    };
+    const testing = service.testIr(irCommand(true));
+    await flush();
+    expect(await testing).toEqual({ type: "ack", command: "IRPLAY" });
+    expect(port.writes).toContain("IRBEGIN 1 35 2 150 0");
+    const chunks = port.writes.filter((command) =>
+      command.startsWith("IRDATA "),
+    );
+    expect(chunks).toEqual([
+      `IRDATA 0 ${"0a14".repeat(16)}`,
+      "IRDATA 32 0a140a",
+    ]);
+    expect(port.writes.at(-1)).toBe("IRPLAY");
+    await service.disconnect();
+  });
+
+  it("stops a rejected raw transfer without transmitting or continuing it", async () => {
+    const { service, port } = await connected();
+    port.onWrite = (command) => {
+      if (command === "HELLO") port.reply(irHello);
+      else if (command.startsWith("IRDATA "))
+        port.reply({ type: "ack", command: "IRDATA", offset: 99 });
+      else port.reply({ type: "ack", command: command.split(" ")[0] });
+    };
+    const testing = failure(service.testIr(irCommand(true)));
+    await flush();
+    expect(String(await testing)).toContain("unexpected IR data offset");
+    expect(port.writes.at(-1)).toBe("STOP");
+    expect(port.writes).not.toContain("IRPLAY");
+    expect(port.writes.some((command) => command.startsWith("IRDATA 32"))).toBe(
+      false,
+    );
+    await service.disconnect();
+  });
+
+  it("keeps STOP immediate during RAM transfer and prevents later IRPLAY", async () => {
+    const { service, port } = await connected();
+    port.onWrite = (command) => {
+      if (command === "HELLO") port.reply(irHello);
+      if (command.startsWith("IRBEGIN "))
+        port.reply({ type: "ack", command: "IRBEGIN" });
+      if (command === "STOP") port.reply({ type: "ack", command: "STOP" });
+    };
+    const testing = failure(service.testIr(irCommand(true)));
+    await flush();
+    expect(port.writes.at(-1)?.startsWith("IRDATA 0 ")).toBe(true);
+    const stopping = service.cancelIr();
+    await flush();
+    await stopping;
+    expect(await testing).toBeInstanceOf(Error);
+    expect(port.writes.at(-1)).toBe("STOP");
+    expect(port.writes).not.toContain("IRPLAY");
+    await service.disconnect();
+  });
+
+  it.each([
+    null,
+    { ...irCommand(), sendCount: 0 },
+    { ...irCommand(), gapMs: 51 },
+    { ...irCommand(), signal: { kind: "nec", code: -1 } },
+    {
+      ...irCommand(),
+      signal: { kind: "raw", pulsesUs: [101, 100, 100, 100, 100] },
+    },
+  ])(
+    "rejects invalid RAM commands before serial mutation (%s)",
+    async (value) => {
+      const { service, port } = await connected();
+      const writes = port.writes.length;
+      const testing = failure(service.testIr(value as IrCommand));
+      await flush();
+      expect(String(await testing)).toContain("Invalid IR command");
+      expect(port.writes).toHaveLength(writes);
+      await service.disconnect();
+    },
+  );
+
+  it("preserves the generic command allowlist", async () => {
+    const { service, port } = await connected();
+    for (const command of ["IRLEARN", "IRPLAY", "IRBEGIN 0 0 1 100 1"])
+      await expect(service.command(command)).rejects.toThrow(
+        "Unsupported controller command",
+      );
+    expect(port.writes).toEqual(["HELLO"]);
+    await service.disconnect();
+  });
+
+  it("requires IR replay for v2 before BEGIN and permits an IR-only image without zone capability", async () => {
+    const { service, port } = await connected();
+    const project = createDefaultProject();
+    project.ir = {
+      enabled: true,
+      txPin: null,
+      rxPin: null,
+      commands: [irCommand()],
+    };
+    project.states[0].irEvents = [
+      { id: "candle-start", atMs: 0, commandId: "candle-on" },
+    ];
+    const values = [...compileProject(synchronizeAudioPlayers(project)).bytes];
+    expect(values.at(-6)).toBe(2);
+    expect(values.at(-5)).toBe(0);
+    for (const irReplay of [undefined, false, "true"]) {
+      port.onWrite = () => port.reply({ ...hello, irReplay });
+      const denied = failure(service.upload(values));
+      await flush();
+      expect(String(await denied)).toContain("use IR commands");
+      expect(port.writes.some((command) => command.startsWith("BEGIN "))).toBe(
+        false,
+      );
+    }
+    port.onWrite = (command) => {
+      if (command === "HELLO")
+        port.reply({ ...hello, irReplay: true, distanceZones: false });
+      else if (command.startsWith("DATA ")) {
+        const [, offset, data] = command.split(" ");
+        port.reply({
+          type: "ack",
+          command: "DATA",
+          offset: Number(offset) + data.length / 2,
+        });
+      } else port.reply({ type: "ack", command: command.split(" ")[0] });
+    };
+    const uploaded = service.upload(values);
+    await flush();
+    expect(await uploaded).toEqual({ type: "ack", command: "COMMIT" });
+    await service.disconnect();
+  });
+
+  it("requires both capabilities when a v2 image combines IR and distance zones", async () => {
+    const { service, port } = await connected();
+    const project = createDefaultProject();
+    project.ir = {
+      enabled: true,
+      txPin: null,
+      rxPin: null,
+      commands: [irCommand()],
+    };
+    Object.assign(project.triggers[0], {
+      kind: "ultrasonic",
+      activeLow: false,
+      pullup: false,
+      distanceMode: "zones",
+      zones: [
+        {
+          id: "near",
+          name: "Near",
+          minCm: 2,
+          maxCm: 100,
+          hysteresisCm: 10,
+          onEnter: [{ id: "on", kind: "ir", commandId: "candle-on" }],
+          onExit: [],
+        },
+      ],
+    });
+    const values = [...compileProject(synchronizeAudioPlayers(project)).bytes];
+    expect(values.at(-6)).toBe(2);
+    expect(values.at(-5)).toBe(1);
+    port.onWrite = () => port.reply({ ...hello, irReplay: true });
+    const denied = failure(service.upload(values));
+    await flush();
+    expect(String(await denied)).toContain("ultrasonic distance zones");
+    expect(port.writes.some((command) => command.startsWith("BEGIN "))).toBe(
+      false,
+    );
+    await service.disconnect();
+  });
+});
+
 import { SerialService } from "../../src/main/serial-service";
 
-const hello = { type: "hello", protocol: 1, board: "uno", capacity: 1024 };
 const flush = () => vi.advanceTimersByTimeAsync(0);
 const scene = () => Array.from(compileProject(createDefaultProject()).bytes);
 const failure = <T>(promise: Promise<T>) =>

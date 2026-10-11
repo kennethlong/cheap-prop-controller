@@ -22,6 +22,7 @@ import type { SceneProject, ValidationIssue } from "../shared/model";
 import { resolveAudioTransition } from "../shared";
 import { AudioTrimEditor } from "./AudioTrimEditor";
 import { DistanceZonesEditor } from "./DistanceZonesEditor";
+import { IrLibrary } from "./IrLibrary";
 
 export interface EditorProps {
   project: SceneProject;
@@ -82,10 +83,14 @@ export function Hardware({
   issues,
   usedBytes,
   capacityBytes,
+  notify,
+  confirm,
 }: EditorProps & {
   issues: ValidationIssue[];
   usedBytes: number;
   capacityBytes: number;
+  notify(message: string, error?: boolean): void;
+  confirm(message: string, action: () => void): void;
 }) {
   const allocation = allocatePins(project);
   const playerCount = requiredPlayerCount(project);
@@ -197,6 +202,12 @@ export function Hardware({
             </p>
           </div>
         </section>
+        <IrLibrary
+          project={project}
+          change={change}
+          notify={notify}
+          confirm={confirm}
+        />
         <section className="card full">
           <div className="card-heading">
             <h3>

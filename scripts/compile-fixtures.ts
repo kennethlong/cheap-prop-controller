@@ -153,6 +153,61 @@ if (process.argv.includes("--golden"))
     compiledFade.bytes,
   );
 const dense = createDefaultProject();
+const irTraining = createDefaultProject();
+irTraining.name = "IR learning starter";
+irTraining.ir = { enabled: true, txPin: null, rxPin: null, commands: [] };
+const allocatedIrTraining = allocatePins(irTraining).project;
+const compiledIrEmpty = compileProject(allocatedIrTraining);
+if (!compiledIrEmpty.bytes.length)
+  throw new Error(JSON.stringify(compiledIrEmpty.issues));
+await writeFile("artifacts/scenes/uno-ir-empty.bin", compiledIrEmpty.bytes);
+const irTest = structuredClone(allocatedIrTraining);
+irTest.name = "Synthetic IR protocol fixture (not learned prop commands)";
+irTest.ir!.commands = [
+  {
+    id: "test-nec",
+    name: "Synthetic NEC test",
+    signal: { kind: "nec", code: 0xef10df20 },
+    sendCount: 1,
+    gapMs: 100,
+  },
+  {
+    id: "test-raw",
+    name: "Synthetic raw test",
+    signal: { kind: "raw", pulsesUs: [1000, 500, 1000, 500, 550] },
+    sendCount: 2,
+    gapMs: 150,
+  },
+];
+irTest.states[0].irEvents = [{ id: "startup", atMs: 0, commandId: "test-nec" }];
+irTest.states[1].irEvents = [
+  { id: "timed", atMs: 1000, commandId: "test-raw" },
+];
+Object.assign(irTest.triggers[0], {
+  kind: "ultrasonic",
+  activeLow: false,
+  pullup: false,
+  distanceMode: "zones",
+  zones: [
+    {
+      id: "near",
+      name: "Near",
+      minCm: 2,
+      maxCm: 100,
+      hysteresisCm: 5,
+      onEnter: [{ id: "send", kind: "ir", commandId: "test-nec" }],
+      onExit: [],
+    },
+  ],
+});
+const compiledIr = compileProject(allocatePins(irTest).project);
+if (!compiledIr.bytes.length)
+  throw new Error(JSON.stringify(compiledIr.issues));
+await writeFile("artifacts/scenes/uno-ir.bin", compiledIr.bytes);
+if (process.argv.includes("--golden")) {
+  await writeFile("tests/core/ir-scene.bin", compiledIr.bytes);
+  await writeFile("tests/core/ir-empty-scene.bin", compiledIrEmpty.bytes);
+}
 dense.states[2].events = Array.from({ length: 110 }, (_, index) => ({
   id: `dense-${index}`,
   outputId: "output-1",
@@ -165,6 +220,10 @@ if (!denseImage.bytes.length)
 await writeFile("artifacts/scenes/uno-dense.bin", denseImage.bytes);
 if (process.argv.includes("--examples")) {
   await mkdir("examples", { recursive: true });
+  await writeFile(
+    "examples/ir-learning-starter.cpc.json",
+    JSON.stringify(allocatedIrTraining, null, 2) + "\n",
+  );
   await writeFile(
     "examples/ultrasonic-zones-uno.cpc.json",
     JSON.stringify(allocatedZones, null, 2) + "\n",

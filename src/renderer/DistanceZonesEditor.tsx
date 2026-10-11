@@ -224,18 +224,30 @@ function ZoneActions({
                         kind: "state",
                         stateId: project.initialStateId,
                       }
-                    : {
-                        id: action.id,
-                        kind: "volume",
-                        target: "ambient",
-                        volume: 15,
-                        fadeMs: 250,
-                      },
+                    : event.target.value === "ir"
+                      ? {
+                          id: action.id,
+                          kind: "ir",
+                          commandId: project.ir?.commands[0]?.id ?? "",
+                        }
+                      : {
+                          id: action.id,
+                          kind: "volume",
+                          target: "ambient",
+                          volume: 15,
+                          fadeMs: 250,
+                        },
                 )
               }
             >
               <option value="state">Change state</option>
               <option value="volume">Set volume</option>
+              <option
+                value="ir"
+                disabled={!project.ir?.enabled || !project.ir.commands.length}
+              >
+                Send IR command
+              </option>
             </select>
             <button
               className="icon ghost"
@@ -276,6 +288,26 @@ function ZoneActions({
                 {project.states.map((state) => (
                   <option key={state.id} value={state.id}>
                     {state.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : action.kind === "ir" ? (
+            <label>
+              IR command
+              <select
+                aria-label={`${label} action ${index + 1} IR command`}
+                value={action.commandId}
+                onChange={(event) =>
+                  edit(index, { ...action, commandId: event.target.value })
+                }
+              >
+                {!project.ir?.commands.some(
+                  (command) => command.id === action.commandId,
+                ) && <option value={action.commandId}>Missing command</option>}
+                {(project.ir?.commands ?? []).map((command) => (
+                  <option key={command.id} value={command.id}>
+                    {command.name}
                   </option>
                 ))}
               </select>
@@ -339,6 +371,11 @@ function ZoneActions({
         </div>
       ))}
       {!actions.length && <span className="hint">No action</span>}
+      {(!project.ir?.enabled || !project.ir.commands.length) && (
+        <span className="hint">
+          Enable IR and learn a command in Hardware to add an IR action.
+        </span>
+      )}
       <button
         className="ghost small"
         disabled={!canAdd}

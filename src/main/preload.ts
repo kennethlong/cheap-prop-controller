@@ -4,7 +4,11 @@ const api: DesktopAPI = {
   listPorts: () => ipcRenderer.invoke("device:list"),
   connect: (port) => ipcRenderer.invoke("device:connect", port),
   disconnect: () => ipcRenderer.invoke("device:disconnect"),
+  getDeviceStatus: () => ipcRenderer.invoke("device:get-status"),
   deviceCommand: (command) => ipcRenderer.invoke("device:command", command),
+  learnIr: () => ipcRenderer.invoke("device:ir-learn"),
+  testIr: (command) => ipcRenderer.invoke("device:ir-test", command),
+  cancelIr: () => ipcRenderer.invoke("device:ir-cancel"),
   uploadScene: (bytes) => ipcRenderer.invoke("device:upload", bytes),
   flashFirmware: (board, port, variant) =>
     ipcRenderer.invoke("device:flash", board, port, variant),

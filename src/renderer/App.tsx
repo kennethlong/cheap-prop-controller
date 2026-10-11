@@ -42,16 +42,22 @@ import { DevicePanel } from "./DevicePanel";
 import { Hardware, Issues, Media, TrackSelect } from "./Hardware";
 import { Timeline, time } from "./Timeline";
 import { PreviewAudio } from "./audio";
+import { useDevice } from "./DeviceContext";
 
 const initial = createDefaultProject();
 const errorText = (error: unknown) => String(error).replace(/^Error: /, "");
 
 export function App() {
+  const device = useDevice();
   const [project, setProject] = useState<SceneProject>(initial);
+  const [projectEpoch, setProjectEpoch] = useState(0);
   const [selectedStateId, setSelectedStateId] = useState(
     initial.states[2]?.id ?? initial.initialStateId,
   );
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  const [selectedIrEventId, setSelectedIrEventId] = useState<string | null>(
+    null,
+  );
   const [tab, setTab] = useState<"scene" | "hardware" | "media">("scene");
   const [dirty, setDirty] = useState(false);
   const [path, setPath] = useState("");
@@ -107,6 +113,10 @@ export function App() {
     project.states.find((item) => item.id === selectedStateId) ??
     project.states[0];
   const event = state.events.find((item) => item.id === selectedEventId);
+  const irEvent = state.irEvents?.find((item) => item.id === selectedIrEventId);
+  useEffect(() => {
+    setSelectedIrEventId(null);
+  }, [selectedStateId]);
   const activeState = project.states.find(
     (item) => item.id === snapshot?.stateId,
   );
@@ -144,6 +154,13 @@ export function App() {
     setPosition(0);
   };
   const change = (recipe: (next: SceneProject) => void) => {
+    if (device.busy) {
+      notify(
+        `Wait for ${device.busy.toLowerCase()} to finish, or press STOP.`,
+        true,
+      );
+      return;
+    }
     const previous = projectRef.current;
     const next = structuredClone(previous);
     recipe(next);
@@ -163,6 +180,7 @@ export function App() {
     else audio.current.stopAll();
   };
   const undo = () => {
+    if (device.busy) return;
     if (!history.length) return;
     stopPreview();
     const previous = history[history.length - 1];
@@ -174,6 +192,7 @@ export function App() {
     setDirty(true);
   };
   const redo = () => {
+    if (device.busy) return;
     if (!future.length) return;
     stopPreview();
     const next = future[0];
@@ -195,6 +214,7 @@ export function App() {
     );
   };
   const replaceProject = (next: SceneProject, nextPath = "") => {
+    setProjectEpoch((value) => value + 1);
     stopPreview();
     audio.current.clear();
     loadGeneration.current++;
@@ -209,6 +229,7 @@ export function App() {
     setFuture([]);
     setSelectedStateId(next.initialStateId);
     setSelectedEventId(null);
+    setSelectedIrEventId(null);
     setWaveforms({});
     setDurations({});
     setLoaded(new Set());
@@ -430,6 +451,19 @@ export function App() {
         void play();
       } else if (
         (e.key === "Delete" || e.key === "Backspace") &&
+        irEvent &&
+        tab === "scene"
+      ) {
+        e.preventDefault();
+        change((next) => {
+          const target = next.states.find((item) => item.id === state.id)!;
+          target.irEvents = target.irEvents?.filter(
+            (item) => item.id !== irEvent.id,
+          );
+        });
+        setSelectedIrEventId(null);
+      } else if (
+        (e.key === "Delete" || e.key === "Backspace") &&
         event &&
         tab === "scene"
       ) {
@@ -439,7 +473,10 @@ export function App() {
           s.events = s.events.filter((item) => item.id !== event.id);
         });
         setSelectedEventId(null);
-      } else if (e.key === "Escape") setSelectedEventId(null);
+      } else if (e.key === "Escape") {
+        setSelectedEventId(null);
+        setSelectedIrEventId(null);
+      }
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
@@ -763,11 +800,15 @@ export function App() {
           </div>
         </div>
         <div className="header-actions">
-          <button className="ghost" onClick={newProject}>
+          <button
+            className="ghost"
+            onClick={newProject}
+            disabled={!!device.busy}
+          >
             <FilePlus2 size={16} />
             <span className="button-label">New</span>
           </button>
-          <button className="ghost" onClick={open}>
+          <button className="ghost" onClick={open} disabled={!!device.busy}>
             <FolderOpen size={16} />
             <span className="button-label">Open</span>
           </button>
@@ -846,7 +887,7 @@ export function App() {
                       <span>
                         {item.id === project.initialStateId
                           ? "INITIAL"
-                          : `${item.events.length} events`}
+                          : `${item.events.length + (item.irEvents?.length ?? 0)} events`}
                       </span>
                       <span>
                         {item.durationMs / 1000}s
@@ -929,8 +970,8 @@ export function App() {
                     )}
                   </div>
                   <p>
-                    {state.events.length} events · {project.outputs.length}{" "}
-                    channels ·{" "}
+                    {state.events.length + (state.irEvents?.length ?? 0)} events
+                    · {project.outputs.length} channels ·{" "}
                     {state.loopTimeline
                       ? "Repeating timeline"
                       : "Holds idle outputs after timeline"}
@@ -959,7 +1000,26 @@ export function App() {
                 project={project}
                 state={state}
                 selectedEvent={selectedEventId}
-                onSelect={setSelectedEventId}
+                onSelect={(id) => {
+                  setSelectedEventId(id);
+                  setSelectedIrEventId(null);
+                }}
+                selectedIrEvent={selectedIrEventId}
+                onSelectIr={(id) => {
+                  setSelectedIrEventId(id);
+                  setSelectedEventId(null);
+                }}
+                onAddIr={(atMs) => {
+                  const command = project.ir?.commands[0];
+                  if (!command) return;
+                  const id = crypto.randomUUID();
+                  updateState((next) => {
+                    next.irEvents ??= [];
+                    next.irEvents.push({ id, atMs, commandId: command.id });
+                  });
+                  setSelectedEventId(null);
+                  setSelectedIrEventId(id);
+                }}
                 onEvents={(events) =>
                   updateState((next) => {
                     next.events = events;
@@ -989,13 +1049,85 @@ export function App() {
                 distances={snapshot?.distances ?? {}}
                 distanceResetKey={previewDistanceEpoch.current}
                 previewAudio={snapshot?.audio ?? []}
+                irActivity={snapshot?.irActivity ?? []}
                 enabledTriggers={
                   activeState?.transitions.map((t) => t.triggerId) ?? []
                 }
               />
             </section>
             <aside className="inspector">
-              {event ? (
+              {irEvent ? (
+                <>
+                  <div className="row between">
+                    <span className="section-label">Selected IR command</span>
+                    <button
+                      className="ghost small"
+                      onClick={() => setSelectedIrEventId(null)}
+                    >
+                      Done
+                    </button>
+                  </div>
+                  <label>
+                    IR command
+                    <select
+                      aria-label="IR event command"
+                      value={irEvent.commandId}
+                      onChange={(event) =>
+                        updateState((next) => {
+                          next.irEvents!.find(
+                            (item) => item.id === irEvent.id,
+                          )!.commandId = event.target.value;
+                        })
+                      }
+                    >
+                      {(project.ir?.commands ?? []).map((command) => (
+                        <option key={command.id} value={command.id}>
+                          {command.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Time (seconds)
+                    <input
+                      aria-label="IR event time seconds"
+                      type="number"
+                      min="0"
+                      max={(state.durationMs - 50) / 1000}
+                      step="0.05"
+                      value={irEvent.atMs / 1000}
+                      onChange={(event) =>
+                        updateState((next) => {
+                          next.irEvents!.find(
+                            (item) => item.id === irEvent.id,
+                          )!.atMs =
+                            Math.round(Number(event.target.value) * 20) * 50;
+                        })
+                      }
+                    />
+                  </label>
+                  <p className="hint">
+                    Sends this named command once at the selected point. Its
+                    complete-press count and gap come from the IR library in
+                    Hardware.
+                  </p>
+                  <button
+                    className="danger"
+                    onClick={() => {
+                      updateState((next) => {
+                        next.irEvents = next.irEvents!.filter(
+                          (item) => item.id !== irEvent.id,
+                        );
+                      });
+                      setSelectedIrEventId(null);
+                    }}
+                  >
+                    <Trash2 size={14} />
+                    Delete IR event
+                  </button>
+                  <div className="divider" />
+                </>
+              ) : event ? (
                 <>
                   <div className="row between">
                     <span className="section-label">Selected event</span>
@@ -1409,11 +1541,14 @@ export function App() {
         )}
         {tab === "hardware" && (
           <Hardware
+            key={projectEpoch}
             project={project}
             change={change}
             issues={compiled.issues}
             usedBytes={compiled.usedBytes}
             capacityBytes={compiled.capacityBytes}
+            notify={notify}
+            confirm={(message, action) => setConfirmAction({ message, action })}
           />
         )}
         {tab === "media" && (
@@ -1468,7 +1603,11 @@ export function App() {
         </span>
         <span>
           {allocation.availableOutputPins.length} free pins ·{" "}
-          {project.states.reduce((sum, item) => sum + item.events.length, 0)}{" "}
+          {project.states.reduce(
+            (sum, item) =>
+              sum + item.events.length + (item.irEvents?.length ?? 0),
+            0,
+          )}{" "}
           events · 50 ms resolution
         </span>
         <span>MVP · local projects</span>

@@ -11,7 +11,7 @@ import { SerialService } from "./serial-service";
 import { ProjectStore } from "./project-store";
 import { ProjectFolder } from "./project-folder";
 import { flashFirmware } from "./firmware";
-import type { BoardId, MediaTrack } from "../shared/model";
+import type { BoardId, IrCommand, MediaTrack } from "../shared/model";
 
 const serial = new SerialService();
 const projectFolder = new ProjectFolder(
@@ -71,6 +71,19 @@ handle("device:connect", (port: string) => {
   return serial.connect(port);
 });
 handle("device:disconnect", () => serial.disconnect());
+handle("device:get-status", () => serial.getDeviceStatus());
+handle("device:ir-learn", () => {
+  available();
+  return serial.learnIr();
+});
+handle("device:ir-test", (command: IrCommand) => {
+  available();
+  return serial.testIr(command);
+});
+handle("device:ir-cancel", () => {
+  available();
+  return serial.cancelIr();
+});
 handle("device:command", (command: string) => {
   available();
   return serial.command(command);

@@ -160,7 +160,10 @@ describe("distance zone project and image contract", () => {
     const malformed = JSON.parse(JSON.stringify(value));
     malformed.triggers[0].zones[0].onEnter[0].target = "output-1";
     expect(() => parseProject(malformed)).toThrow("Expected one of");
-    malformed.triggers[0].zones[0].onEnter[0] = { id: "a", kind: "ir" };
+    malformed.triggers[0].zones[0].onEnter[0] = {
+      id: "a",
+      kind: "unsupported",
+    };
     expect(() => parseProject(malformed)).toThrow("Expected one of");
   });
 

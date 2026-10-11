@@ -1,5 +1,428 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
+import type { SceneProject } from "../../src/shared";
+
+// Explicit test-only transport. The shipped renderer never invents learned codes
+// or simulates a physical connection when window.cpc is unavailable.
+async function installIrTransport(page: Page) {
+  await page.addInitScript(() => {
+    let capture: ((signal: unknown) => void) | null = null;
+    let reject: ((error: Error) => void) | null = null;
+    let saved: unknown = null;
+    const calls: Array<{ method: string; data?: unknown }> = [];
+    const hello = {
+      type: "hello",
+      board: "uno",
+      irLearning: true,
+      irReplay: true,
+    };
+    const status = { connected: true, port: "TEST-ONLY", hello };
+    const api = {
+      getDeviceStatus: async () => status,
+      listPorts: async () => [
+        { path: "TEST-ONLY", manufacturer: "Test transport" },
+      ],
+      onDeviceStatus: () => () => {},
+      onDeviceLog: () => () => {},
+      connect: async () => hello,
+      disconnect: async () => {},
+      learnIr: () => {
+        calls.push({ method: "learn" });
+        return new Promise((resolve, fail) => {
+          capture = resolve;
+          reject = fail;
+        });
+      },
+      cancelIr: async () => {
+        calls.push({ method: "stop" });
+        reject?.(new Error("IR learning cancelled. Controller stays stopped."));
+        capture = null;
+        reject = null;
+        return { type: "ack" };
+      },
+      testIr: async (command: unknown) => {
+        calls.push({ method: "test", data: structuredClone(command) });
+        return { type: "ack" };
+      },
+      deviceCommand: async (command: string) => {
+        calls.push({ method: "command", data: command });
+        return { type: "ack" };
+      },
+      uploadScene: async (bytes: unknown) => {
+        calls.push({ method: "upload", data: bytes });
+        return { type: "ack" };
+      },
+      saveProject: async (project: unknown) => {
+        saved = structuredClone(project);
+        return { project: structuredClone(saved), path: "test/ir.cpc.json" };
+      },
+      openProject: async () =>
+        saved
+          ? { project: structuredClone(saved), path: "test/ir.cpc.json" }
+          : null,
+    };
+    Object.assign(window, {
+      cpc: api,
+      __irHarness: {
+        capture: (signal: unknown) => {
+          capture?.(signal);
+          capture = null;
+          reject = null;
+        },
+        fail: (message: string) => {
+          reject?.(new Error(message));
+          capture = null;
+          reject = null;
+        },
+        get saved() {
+          return saved;
+        },
+        get calls() {
+          return calls;
+        },
+      },
+    });
+  });
+}
+
+test("IR library learns, tests, names timeline and zone actions, persists, renames, and cleans references", async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await installIrTransport(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Hardware", exact: true }).click();
+  await page.getByLabel("Enable IR remote control").check();
+  const library = page.getByRole("region", {
+    name: "IR command library",
+    exact: true,
+  });
+  await expect(library).toContainText("Receiver: D2");
+  await expect(library).toContainText("Transmitter: D9");
+  await page.getByRole("button", { name: "Upload scene", exact: true }).click();
+  await library
+    .getByRole("button", { name: "Learn IR command", exact: true })
+    .click();
+  await expect(library).toContainText("press a button once");
+  await expect(
+    page.getByRole("button", { name: "Upload scene", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Arm / reset", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "STOP", exact: true }),
+  ).toBeEnabled();
+  await page.evaluate(
+    "window.__irHarness.capture({kind:'nec',code:551489775})",
+  );
+  const capture = page.getByRole("region", {
+    name: "Captured IR command",
+    exact: true,
+  });
+  await expect(capture).toContainText("NEC");
+  await capture.getByLabel("Captured name").fill("Candle on");
+  await capture.getByLabel("Captured send count").fill("2");
+  await capture.getByLabel("Captured gap milliseconds").fill("150");
+  await capture
+    .getByRole("button", { name: "Test captured command", exact: true })
+    .click();
+  await expect(library).toContainText("Test queued for “Candle on”");
+  await capture
+    .getByRole("button", { name: "Save IR command", exact: true })
+    .click();
+  await expect(capture).toHaveCount(0);
+  await expect(page.getByLabel("IR command 1 name")).toHaveValue("Candle on");
+
+  await page.getByLabel("Trigger 1 type").selectOption("ultrasonic");
+  await page.getByLabel("Trigger 1 distance behavior").selectOption("zones");
+  const near = page.getByRole("region", {
+    name: "Approach zone 1",
+    exact: true,
+  });
+  await near.getByLabel("On enter action 1 type").selectOption("ir");
+  await expect(near.getByLabel("On enter action 1 IR command")).toHaveText(
+    "Candle on",
+  );
+  await page.getByRole("button", { name: "Scene", exact: true }).click();
+  await page
+    .locator(".state-list")
+    .getByRole("button", { name: /Idle/ })
+    .click();
+  await page
+    .getByRole("button", { name: "Add IR command", exact: true })
+    .click();
+  await page.getByLabel("IR event time seconds").fill("0.25");
+  await expect(
+    page.getByRole("button", {
+      name: "IR Candle on at 0.25 seconds",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Delete IR event", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(
+    page.getByRole("button", {
+      name: "IR Candle on at 0.25 seconds",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Add IR command", exact: true })
+    .click();
+  await page.getByLabel("IR event time seconds").fill("0.35");
+  const firstPoint = page.getByRole("button", {
+    name: "IR Candle on at 0.25 seconds",
+    exact: true,
+  });
+  const secondPoint = page.getByRole("button", {
+    name: "IR Candle on at 0.35 seconds",
+    exact: true,
+  });
+  const firstBounds = await firstPoint.boundingBox();
+  const secondBounds = await secondPoint.boundingBox();
+  expect(firstBounds).not.toBeNull();
+  expect(secondBounds).not.toBeNull();
+  expect(secondBounds!.y).toBeGreaterThanOrEqual(
+    firstBounds!.y + firstBounds!.height,
+  );
+  await firstPoint.click();
+  await expect(page.getByLabel("IR event time seconds")).toHaveValue("0.25");
+  await firstPoint.dblclick();
+  await expect(
+    page.getByTestId("ir-timeline-lane").getByRole("button"),
+  ).toHaveCount(2);
+  await secondPoint.click();
+  await expect(page.getByLabel("IR event time seconds")).toHaveValue("0.35");
+  await page
+    .getByRole("button", { name: "Delete IR event", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Save project", exact: true }).click();
+  const saved = await page.evaluate<SceneProject>("window.__irHarness.saved");
+  expect(saved.ir!.commands[0]).toMatchObject({
+    name: "Candle on",
+    signal: { kind: "nec", code: 551489775 },
+    sendCount: 2,
+    gapMs: 150,
+  });
+  expect(saved.states[0].irEvents).toContainEqual(
+    expect.objectContaining({ atMs: 250, commandId: saved.ir!.commands[0].id }),
+  );
+  expect(saved.triggers[0].zones![0].onEnter[0]).toMatchObject({
+    kind: "ir",
+    commandId: saved.ir!.commands[0].id,
+  });
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await page.getByRole("button", { name: "Open", exact: true }).click();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(
+    page.getByRole("button", {
+      name: "IR Candle on at 0.25 seconds",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Play preview", exact: true }).click();
+  await expect(
+    page.getByRole("log", { name: "Preview IR activity", exact: true }),
+  ).toContainText("Candle on · Timeline");
+  await page
+    .getByLabel("Approach preview distance", { exact: true })
+    .fill("300");
+  await expect(page.getByTestId("distance-zone-approach")).toHaveText(
+    "Zone: None",
+  );
+  await page
+    .getByLabel("Approach preview distance", { exact: true })
+    .fill("50");
+  await expect(
+    page.getByRole("log", { name: "Preview IR activity", exact: true }),
+  ).toContainText("Candle on · Distance zone");
+  await page.screenshot({
+    path: "artifacts/ir-timeline-preview.png",
+    fullPage: true,
+  });
+  await page.getByRole("button", { name: "Stop preview", exact: true }).click();
+  await page.getByRole("button", { name: "Hardware", exact: true }).click();
+  await page.getByLabel("IR command 1 name").fill("Candles bright");
+  await expect(near.getByLabel("On enter action 1 IR command")).toHaveText(
+    "Candles bright",
+  );
+  await page.getByRole("button", { name: "Scene", exact: true }).click();
+  await expect(
+    page.getByRole("button", {
+      name: "IR Candles bright at 0.25 seconds",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Hardware", exact: true }).click();
+  await library
+    .getByRole("button", {
+      name: "Delete IR command Candles bright",
+      exact: true,
+    })
+    .click();
+  await expect(page.getByRole("dialog")).toContainText(
+    "2 timeline or distance-zone references",
+  );
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(page.getByLabel("IR command 1 name")).toHaveCount(0);
+  await expect(near.getByLabel("On enter action 1 IR command")).toHaveCount(0);
+  await page.getByRole("button", { name: "Save project", exact: true }).click();
+  const removed = await page.evaluate<SceneProject>("window.__irHarness.saved");
+  expect(removed.ir!.commands).toEqual([]);
+  expect(removed.states[0].irEvents).toEqual([]);
+  expect(removed.triggers[0].zones![0].onEnter).toEqual([]);
+  const calls = await page.evaluate<Array<{ method: string }>>(
+    "window.__irHarness.calls",
+  );
+  expect(
+    calls.filter((call: { method: string }) => call.method === "upload"),
+  ).toHaveLength(1);
+  expect(
+    calls.filter((call: { method: string }) => call.method === "test"),
+  ).toHaveLength(1);
+  expect(errors).toEqual([]);
+});
+
+test("IR raw capture, invalid draft, timeout, and priority STOP remain explicit and repairable", async ({
+  page,
+}) => {
+  await installIrTransport(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Hardware", exact: true }).click();
+  await page.getByLabel("Enable IR remote control").check();
+  const library = page.getByRole("region", {
+    name: "IR command library",
+    exact: true,
+  });
+  await library
+    .getByRole("button", { name: "Learn IR command", exact: true })
+    .click();
+  await page.getByRole("button", { name: "STOP", exact: true }).click();
+  await expect(library).toContainText("cancelled");
+  await expect(
+    library.getByRole("button", { name: "Learn IR command", exact: true }),
+  ).toBeEnabled();
+  await library
+    .getByRole("button", { name: "Learn IR command", exact: true })
+    .click();
+  await page.evaluate(
+    "window.__irHarness.fail('No IR signal received before timeout. Controller stays stopped.')",
+  );
+  await expect(library).toContainText("timeout");
+  await library
+    .getByRole("button", { name: "Learn IR command", exact: true })
+    .click();
+  await page.evaluate(
+    "window.__irHarness.capture({kind:'raw',pulsesUs:[1000,1000,500,500,500]})",
+  );
+  const capture = page.getByRole("region", {
+    name: "Captured IR command",
+    exact: true,
+  });
+  await expect(capture).toContainText("38 kHz assumed");
+  await capture.getByLabel("Captured name").fill("");
+  await expect(
+    capture.getByRole("button", { name: "Save IR command", exact: true }),
+  ).toBeDisabled();
+  await capture.getByLabel("Captured name").fill("Raw fixture");
+  await capture.getByLabel("Captured send count").fill("11");
+  await expect(
+    capture.getByRole("button", { name: "Test captured command", exact: true }),
+  ).toBeDisabled();
+  await capture.getByLabel("Captured send count").fill("1");
+  await capture
+    .getByRole("button", { name: "Save IR command", exact: true })
+    .click();
+  await library
+    .getByRole("button", { name: "Test Raw fixture", exact: true })
+    .click();
+  await expect(library).toContainText("Test queued for “Raw fixture”");
+  await library.scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: "artifacts/ir-learning-library.png",
+    fullPage: true,
+  });
+  const calls = await page.evaluate<Array<{ method: string }>>(
+    "window.__irHarness.calls",
+  );
+  expect(
+    calls.filter((call: { method: string }) => call.method === "stop"),
+  ).toHaveLength(1);
+  expect(
+    calls.filter((call: { method: string }) => call.method === "upload"),
+  ).toHaveLength(0);
+});
+
+test("browser-only IR learning explains the desktop connection requirement", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Hardware", exact: true }).click();
+  await page.getByLabel("Enable IR remote control").check();
+  const library = page.getByRole("region", {
+    name: "IR command library",
+    exact: true,
+  });
+  await expect(library).toContainText(
+    "require the desktop app and a connected controller",
+  );
+  await expect(
+    library.getByRole("button", { name: "Learn IR command", exact: true }),
+  ).toBeDisabled();
+  await page.getByLabel("Microcontroller").selectOption("mega");
+  await expect(library).toContainText("Transmitter: D11");
+  await expect(
+    page.getByRole("region", { name: "Captured IR command", exact: true }),
+  ).toHaveCount(0);
+});
+
+test("IR learning gates mismatched boards and discards capture drafts when opening another project", async ({
+  page,
+}) => {
+  await installIrTransport(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Hardware", exact: true }).click();
+  await page.getByLabel("Enable IR remote control").check();
+  await page.getByRole("button", { name: "Save project", exact: true }).click();
+  const library = page.getByRole("region", {
+    name: "IR command library",
+    exact: true,
+  });
+  await library
+    .getByRole("button", { name: "Learn IR command", exact: true })
+    .click();
+  await page.evaluate(
+    "window.__irHarness.capture({kind:'nec',code:551489775})",
+  );
+  const capture = page.getByRole("region", {
+    name: "Captured IR command",
+    exact: true,
+  });
+  await capture.getByLabel("Captured name").fill("Unsaved capture");
+  await page.getByLabel("Microcontroller").selectOption("mega");
+  await expect(library).toContainText(
+    "Connected board (uno) does not match this project (mega)",
+  );
+  await expect(
+    library.getByRole("button", { name: "Learn IR command", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    capture.getByRole("button", { name: "Test captured command", exact: true }),
+  ).toBeDisabled();
+  await page.getByLabel("Microcontroller").selectOption("uno");
+  await expect(
+    capture.getByRole("button", { name: "Test captured command", exact: true }),
+  ).toBeEnabled();
+  await page.getByRole("button", { name: "Open", exact: true }).click();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect(capture).toHaveCount(0);
+  await expect(page.getByLabel("Enable IR remote control")).toBeChecked();
+  await expect(page.getByLabel("IR command 1 name")).toHaveCount(0);
+});
 
 test("distance zones edit and persist without consuming more pins, and state deletion cleans their actions", async ({
   page,

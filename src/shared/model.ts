@@ -4,8 +4,32 @@ export type TriggerKind = "button" | "pir" | "ultrasonic";
 export type PlayerKind = "dfplayer" | "yx5300";
 export type AudioTransitionMode = "cut" | "crossfade" | "fade-through";
 
+/** NEC stores the complete 32-bit frame, least-significant bit transmitted first. */
+export type IrSignal =
+  { kind: "nec"; code: number } | { kind: "raw"; pulsesUs: number[] };
+export interface IrCommand {
+  id: string;
+  name: string;
+  signal: IrSignal;
+  /** Complete button presses, not a protocol-specific held-button repeat. */
+  sendCount: number;
+  gapMs: number;
+}
+export interface IrConfig {
+  enabled: boolean;
+  txPin: number | null;
+  rxPin: number | null;
+  commands: IrCommand[];
+}
+export interface IrTimelineEvent {
+  id: string;
+  atMs: number;
+  commandId: string;
+}
+
 export type ZoneAction =
   | { id: string; kind: "state"; stateId: string }
+  | { id: string; kind: "ir"; commandId: string }
   | {
       id: string;
       kind: "volume";
@@ -84,6 +108,7 @@ export interface SceneState {
   volume: number;
   loopAudio: boolean;
   events: TimelineEvent[];
+  irEvents?: IrTimelineEvent[];
   transitions: StateTransition[];
 }
 export interface SceneProject {
@@ -94,6 +119,7 @@ export interface SceneProject {
   initialStateId: string;
   outputs: OutputConfig[];
   triggers: TriggerConfig[];
+  ir?: IrConfig;
   audio: {
     players: AudioPlayer[];
     ambientTrack: number | null;
@@ -121,6 +147,9 @@ export const LIMITS = {
   maxTrack: 255,
   zones: 32,
   zoneActions: 64,
+  irCommands: 32,
+  irEvents: 128,
+  irPulses: 127,
 } as const;
 
 export function isZonedTrigger(trigger: TriggerConfig): boolean {

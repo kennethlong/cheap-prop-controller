@@ -1,4 +1,5 @@
 export * from "./model";
+export * from "./ir";
 export * from "./audio-settings";
 export * from "./media-clip";
 export * from "./boards";

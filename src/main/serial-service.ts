@@ -1,7 +1,13 @@
 import { SerialPort } from "serialport";
 import { EventEmitter } from "node:events";
-import type { DeviceReply } from "../desktop-api";
+import type { DeviceReply, DeviceStatus } from "../desktop-api";
 import { verifySceneChecksum } from "../shared/compiler";
+import type { IrCommand, IrSignal } from "../shared/model";
+import {
+  learnIrSignal,
+  validateIrCommand,
+  validateIrSignal,
+} from "../shared/ir";
 
 type Waiter = {
   command: string;
@@ -21,6 +27,11 @@ export class SerialService extends EventEmitter {
 
   get path() {
     return this.port?.isOpen ? this.port.path : undefined;
+  }
+  getDeviceStatus(): DeviceStatus {
+    return this.path
+      ? { connected: true, port: this.path, hello: this.hello }
+      : { connected: false };
   }
   list() {
     return SerialPort.list();
@@ -65,14 +76,20 @@ export class SerialService extends EventEmitter {
       try {
         const reply = JSON.parse(line) as DeviceReply;
         if (!reply || typeof reply.type !== "string") continue;
-        if (reply.type === "hello") this.hello = reply;
+        if (reply.type === "hello") {
+          this.hello = reply;
+          this.emit("status", this.getDeviceStatus());
+        }
         this.emit("message", reply);
         const expected = this.waiter?.command;
         const matches =
           (reply.type === "error" && !this.waiter?.ignoreUnscopedErrors) ||
-          (reply.type === "ack" && reply.command === expected) ||
+          (reply.type === "ack" &&
+            reply.command === expected &&
+            expected !== "IRLEARN") ||
           (reply.type === "hello" && expected === "HELLO") ||
-          (reply.type === "status" && expected === "STATUS");
+          (reply.type === "status" && expected === "STATUS") ||
+          (reply.type === "ir-capture" && expected === "IRLEARN");
         if (this.waiter && matches) {
           const waiter = this.waiter;
           this.waiter = undefined;
@@ -148,7 +165,7 @@ export class SerialService extends EventEmitter {
             "Install Cheap Prop Controller firmware before connecting",
           );
         this.hello = hello;
-        this.emit("status", { connected: true, port: path });
+        this.emit("status", this.getDeviceStatus());
         return hello;
       } catch (error) {
         // An opening port may complete after disconnect. Close that old handle,
@@ -202,6 +219,80 @@ export class SerialService extends EventEmitter {
       return this.priority(() => this.request("STOP", 2500, true));
     return this.exclusive(() => this.request(command));
   }
+  cancelIr(): Promise<DeviceReply> {
+    return this.command("STOP");
+  }
+  private async requireIrCapability(
+    capability: "irLearning" | "irReplay",
+    generation: number,
+  ): Promise<void> {
+    const hello = await this.request("HELLO");
+    this.ensureCurrent(generation);
+    if (hello.protocol !== 1 || hello[capability] !== true)
+      throw new Error(
+        "Install the updated firmware to learn and send IR commands. The saved controller scene has not been changed.",
+      );
+  }
+  private async cleanupIr(generation: number): Promise<void> {
+    if (generation !== this.generation) return;
+    try {
+      await this.request("STOP", 2500, true);
+    } catch {
+      // Preserve the original error; STOP/disconnect cancellation owns cleanup
+      // when a newer generation has already taken over this serial connection.
+    }
+  }
+  learnIr(): Promise<IrSignal> {
+    return this.exclusive(async (generation) => {
+      await this.requireIrCapability("irLearning", generation);
+      try {
+        const capture = await this.request("IRLEARN", 16000);
+        this.ensureCurrent(generation);
+        if (!Array.isArray(capture.pulsesUs))
+          throw new Error("Controller returned an invalid IR capture");
+        const signal = learnIrSignal(capture.pulsesUs);
+        if (!validateIrSignal(signal))
+          throw new Error("Controller returned an invalid IR capture");
+        return signal;
+      } catch (error) {
+        await this.cleanupIr(generation);
+        throw error;
+      }
+    });
+  }
+  testIr(command: IrCommand): Promise<DeviceReply> {
+    return this.exclusive(async (generation) => {
+      if (!validateIrCommand(command)) throw new Error("Invalid IR command");
+      const signal = command.signal;
+      let payload = Buffer.alloc(0);
+      if (signal.kind === "raw") {
+        payload = Buffer.from(signal.pulsesUs.map((pulse) => pulse / 50));
+      }
+      await this.requireIrCapability("irReplay", generation);
+      try {
+        await this.request(
+          `IRBEGIN ${signal.kind === "nec" ? 0 : 1} ${signal.kind === "raw" ? signal.pulsesUs.length : 0} ${command.sendCount} ${command.gapMs} ${signal.kind === "nec" ? signal.code : 0}`,
+        );
+        this.ensureCurrent(generation);
+        for (let offset = 0; offset < payload.length; offset += 32) {
+          const acknowledgement = await this.request(
+            `IRDATA ${offset} ${payload.subarray(offset, offset + 32).toString("hex")}`,
+          );
+          this.ensureCurrent(generation);
+          if (acknowledgement.offset !== Math.min(offset + 32, payload.length))
+            throw new Error(
+              "Controller acknowledged an unexpected IR data offset",
+            );
+        }
+        const result = await this.request("IRPLAY");
+        this.ensureCurrent(generation);
+        return result;
+      } catch (error) {
+        await this.cleanupIr(generation);
+        throw error;
+      }
+    });
+  }
   upload(values: number[]): Promise<DeviceReply> {
     return this.exclusive(async (generation) => {
       if (
@@ -251,10 +342,26 @@ export class SerialService extends EventEmitter {
         throw new Error(
           "Install the updated firmware to mix ambient with foreground audio. The saved controller scene has not been changed.",
         );
-      if ((bytes[16] & 0x80) !== 0 && hello.distanceZones !== true)
-        throw new Error(
-          "Install the updated firmware to use ultrasonic distance zones. The saved controller scene has not been changed.",
-        );
+      if ((bytes[16] & 0x80) !== 0) {
+        const extensionVersion = bytes[bytes.length - 6];
+        const zoneCount = bytes[bytes.length - 5];
+        if (
+          bytes.length < 40 ||
+          bytes[bytes.length - 8] !== 0x5a ||
+          bytes[bytes.length - 7] !== 0x4e ||
+          (extensionVersion !== 1 && extensionVersion !== 2) ||
+          (extensionVersion === 2 && bytes.length < 48)
+        )
+          throw new Error("Unsupported scene extension");
+        if (extensionVersion === 2 && hello.irReplay !== true)
+          throw new Error(
+            "Install the updated firmware to use IR commands. The saved controller scene has not been changed.",
+          );
+        if (zoneCount > 0 && hello.distanceZones !== true)
+          throw new Error(
+            "Install the updated firmware to use ultrasonic distance zones. The saved controller scene has not been changed.",
+          );
+      }
       await this.request(`BEGIN ${bytes.length} ${bytes.readUInt16LE(6)}`);
       try {
         for (let offset = 0; offset < bytes.length; offset += 32) {

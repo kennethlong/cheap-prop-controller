@@ -13,6 +13,7 @@ import {
 import type { PortInfo } from "../desktop-api";
 import type { SceneProject } from "../shared/model";
 import { BOARD_PROFILES } from "../shared/boards";
+import { useDevice } from "./DeviceContext";
 
 interface Props {
   project: SceneProject;
@@ -24,8 +25,8 @@ interface Props {
 export function DevicePanel({ project, bytes, valid, notify }: Props) {
   const [ports, setPorts] = useState<PortInfo[]>([]);
   const [port, setPort] = useState("");
-  const [connected, setConnected] = useState(false);
-  const [busy, setBusy] = useState("");
+  const { status, setStatus, busy, run } = useDevice();
+  const connected = status.connected;
   const [logs, setLogs] = useState<string[]>([]);
   const [showLogs, setShowLogs] = useState(false);
   const [showFlash, setShowFlash] = useState(false);
@@ -55,7 +56,6 @@ export function DevicePanel({ project, bytes, valid, notify }: Props) {
     if (!window.cpc) return;
     const offLog = window.cpc.onDeviceLog(addLog);
     const offStatus = window.cpc.onDeviceStatus((status) => {
-      setConnected(status.connected);
       if (status.port) setPort(status.port);
     });
     return () => {
@@ -64,20 +64,20 @@ export function DevicePanel({ project, bytes, valid, notify }: Props) {
     };
   }, []);
   const action = async (label: string, callback: () => Promise<unknown>) => {
-    setBusy(label);
     try {
-      await callback();
+      await run(label, callback, label === "STOP");
     } catch (error) {
       addLog(String(error));
       setShowLogs(true);
       notify(String(error).replace(/^Error: /, ""), true);
-    } finally {
-      setBusy("");
     }
   };
   const command = (value: string) =>
     action(value, async () => {
-      const result = await window.cpc!.deviceCommand(value);
+      const result =
+        value === "STOP"
+          ? await window.cpc!.cancelIr()
+          : await window.cpc!.deviceCommand(value);
       addLog(`${value} → ${JSON.stringify(result)}`);
       if (result.type === "error")
         throw new Error(
@@ -124,10 +124,10 @@ export function DevicePanel({ project, bytes, valid, notify }: Props) {
                   async () => {
                     if (connected) {
                       await window.cpc!.disconnect();
-                      setConnected(false);
+                      setStatus({ connected: false });
                     } else {
                       const reply = await window.cpc!.connect(port);
-                      setConnected(true);
+                      setStatus({ connected: true, port, hello: reply });
                       addLog(`Connected: ${JSON.stringify(reply)}`);
                       notify(`Connected to ${port}`);
                     }
@@ -289,7 +289,7 @@ export function DevicePanel({ project, bytes, valid, notify }: Props) {
                       port,
                       variant,
                     );
-                    setConnected(false);
+                    setStatus({ connected: false });
                     addLog(result.log);
                     setShowLogs(true);
                     if (!result.success)

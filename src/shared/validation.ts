@@ -1,4 +1,10 @@
-import { BOARD_PROFILES, requiredPlayerCount, SHIELD_PINS } from "./boards";
+import {
+  BOARD_PROFILES,
+  irPins,
+  requiredPlayerCount,
+  SHIELD_PINS,
+} from "./boards";
+import { irCommandDurationMs, validateIrSignal } from "./ir";
 import {
   isZonedTrigger,
   LIMITS,
@@ -116,11 +122,13 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
                 text(action.id, `${actionPath}.id`);
                 enumeration(
                   action.kind,
-                  ["state", "volume"],
+                  ["state", "volume", "ir"],
                   `${actionPath}.kind`,
                 );
                 if (action.kind === "state")
                   text(action.stateId, `${actionPath}.stateId`);
+                if (action.kind === "ir")
+                  text(action.commandId, `${actionPath}.commandId`);
                 if (action.kind === "volume") {
                   enumeration(
                     action.target,
@@ -135,6 +143,31 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
         },
       );
   });
+  if (project.ir !== undefined) {
+    const ir = object(project.ir, "ir");
+    if (ir) {
+      boolean(ir.enabled, "ir.enabled");
+      number(ir.txPin, "ir.txPin", true);
+      number(ir.rxPin, "ir.rxPin", true);
+      array(ir.commands, "ir.commands", 256).forEach((candidate, index) => {
+        const path = `ir.commands.${index}`;
+        const command = object(candidate, path);
+        if (!command) return;
+        text(command.id, `${path}.id`);
+        text(command.name, `${path}.name`);
+        number(command.sendCount, `${path}.sendCount`);
+        number(command.gapMs, `${path}.gapMs`);
+        const signal = object(command.signal, `${path}.signal`);
+        if (!signal) return;
+        enumeration(signal.kind, ["nec", "raw"], `${path}.signal.kind`);
+        if (signal.kind === "nec") number(signal.code, `${path}.signal.code`);
+        if (signal.kind === "raw")
+          array(signal.pulsesUs, `${path}.signal.pulsesUs`, 1024).forEach(
+            (pulse, i) => number(pulse, `${path}.signal.pulsesUs.${i}`),
+          );
+      });
+    }
+  }
   const audio = object(project.audio, "audio");
   if (audio) {
     number(audio.ambientTrack, "audio.ambientTrack", true);
@@ -191,6 +224,17 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
     number(state.volume, `${path}.volume`);
     boolean(state.loopTimeline, `${path}.loopTimeline`);
     boolean(state.loopAudio, `${path}.loopAudio`);
+    if (state.irEvents !== undefined)
+      array(state.irEvents, `${path}.irEvents`, 1024).forEach(
+        (candidate, eventIndex) => {
+          const eventPath = `${path}.irEvents.${eventIndex}`;
+          const event = object(candidate, eventPath);
+          if (!event) return;
+          text(event.id, `${eventPath}.id`);
+          text(event.commandId, `${eventPath}.commandId`);
+          number(event.atMs, `${eventPath}.atMs`);
+        },
+      );
     array(state.events, `${path}.events`, 10000).forEach(
       (entry, eventIndex) => {
         const eventPath = `${path}.events.${eventIndex}`;
@@ -230,18 +274,33 @@ export function estimateSceneBytes(project: SceneProject): number {
   const zones = project.triggers
     .filter(isZonedTrigger)
     .flatMap((trigger) => trigger.zones ?? []);
-  const zoneBytes = zones.length
-    ? 8 +
-      zones.length * 10 +
-      zones.reduce(
-        (sum, zone) => sum + zone.onEnter.length + zone.onExit.length,
+  const zoneBytes =
+    zones.length || project.ir?.enabled
+      ? (project.ir?.enabled ? 16 : 8) +
+        zones.length * 10 +
+        zones.reduce(
+          (sum, zone) => sum + zone.onEnter.length + zone.onExit.length,
+          0,
+        ) *
+          6
+      : 0;
+  const irBytes = project.ir?.enabled
+    ? project.ir.commands.reduce(
+        (sum, command) =>
+          sum +
+          12 +
+          (command.signal.kind === "raw" ? command.signal.pulsesUs.length : 0),
         0,
-      ) *
-        6
+      ) +
+      project.states.reduce(
+        (sum, state) => sum + (state.irEvents?.length ?? 0) * 4,
+        0,
+      )
     : 0;
   return (
     32 +
     zoneBytes +
+    irBytes +
     project.outputs.length * 2 +
     project.triggers.length * 8 +
     project.audio.players.length * 4 +
@@ -316,6 +375,42 @@ export function validateProject(value: unknown): ValidationIssue[] {
       fail(path, `Pin D${pin} is already assigned to ${used.get(pin)}.`);
     used.set(pin, path);
   };
+  const irCommands = new Map(
+    project.ir?.commands.map((command) => [command.id, command]) ?? [],
+  );
+  const irReference = (id: string, path: string) => {
+    if (!project.ir?.enabled)
+      fail(path, "Enable IR hardware before using an IR command.");
+    if (!irCommands.has(id))
+      fail(path, "IR command does not exist in the project library.");
+  };
+  if (project.ir) {
+    integer(project.ir.commands.length, 0, LIMITS.irCommands, "ir.commands");
+    uniqueIds(project.ir.commands, "ir.commands");
+    project.ir.commands.forEach((command, index) => {
+      const path = `ir.commands.${index}`;
+      nonempty(command.name, `${path}.name`);
+      if (command.name.length > 200)
+        fail(`${path}.name`, "Command names are limited to 200 characters.");
+      if (!validateIrSignal(command.signal))
+        fail(
+          `${path}.signal`,
+          "Use a 32-bit NEC frame or 5–127 alternating 38 kHz raw pulses in 50 μs steps, 100–12,750 μs each and at most 200 ms total.",
+        );
+      integer(command.sendCount, 1, 10, `${path}.sendCount`);
+      ticks(command.gapMs, 50, 2000, `${path}.gapMs`);
+    });
+    if (project.ir.enabled) {
+      const fixed = irPins(project.board);
+      claimPin(project.ir.txPin, "ir.txPin");
+      claimPin(project.ir.rxPin, "ir.rxPin");
+      if (project.ir.txPin !== fixed.txPin || project.ir.rxPin !== fixed.rxPin)
+        fail(
+          "ir",
+          `IR on this board requires TX D${fixed.txPin} and RX D${fixed.rxPin}.`,
+        );
+    }
+  }
   project.outputs.forEach((output, index) => {
     nonempty(output.name, `outputs.${index}.name`);
     if (!/^#[0-9a-f]{6}$/i.test(output.color))
@@ -394,6 +489,8 @@ export function validateProject(value: unknown): ValidationIssue[] {
             if (action.kind === "state") {
               if (!stateIds.has(action.stateId))
                 fail(`${actionPath}.stateId`, "Target state does not exist.");
+            } else if (action.kind === "ir") {
+              irReference(action.commandId, `${actionPath}.commandId`);
             } else {
               integer(action.volume, 0, 30, `${actionPath}.volume`);
               ticks(action.fadeMs, 0, 12750, `${actionPath}.fadeMs`);
@@ -516,6 +613,41 @@ export function validateProject(value: unknown): ValidationIssue[] {
         "The initial state uses the global ambient track, not a foreground track.",
       );
     uniqueIds(state.events, `${path}.events`);
+    const irEvents = state.irEvents ?? [];
+    uniqueIds(irEvents, `${path}.irEvents`);
+    const atCount = new Map<number, number>();
+    let irBusyUntil = 0;
+    [...irEvents]
+      .sort((a, b) => a.atMs - b.atMs)
+      .forEach((event) => {
+        const index = irEvents.indexOf(event);
+        const eventPath = `${path}.irEvents.${index}`;
+        irReference(event.commandId, `${eventPath}.commandId`);
+        ticks(
+          event.atMs,
+          0,
+          Math.max(0, state.durationMs - LIMITS.tickMs),
+          `${eventPath}.atMs`,
+        );
+        const count = (atCount.get(event.atMs) ?? 0) + 1;
+        atCount.set(event.atMs, count);
+        if (count > 8)
+          fail(
+            eventPath,
+            "At most eight IR commands can be queued at one time.",
+          );
+        const command = irCommands.get(event.commandId);
+        if (command && validateIrSignal(command.signal)) {
+          if (event.atMs < irBusyUntil)
+            fail(
+              eventPath,
+              "This IR command overlaps a previous transmission and will wait in the send queue.",
+              "warning",
+            );
+          irBusyUntil =
+            Math.max(irBusyUntil, event.atMs) + irCommandDurationMs(command);
+        }
+      });
     const byOutput = new Map<
       string,
       Array<{ start: number; end: number; index: number }>
@@ -576,6 +708,15 @@ export function validateProject(value: unknown): ValidationIssue[] {
       transitionTriggers.add(transition.triggerId);
     });
   });
+  integer(
+    project.states.reduce(
+      (sum, state) => sum + (state.irEvents?.length ?? 0),
+      0,
+    ),
+    0,
+    LIMITS.irEvents,
+    "irEvents",
+  );
   const usedBytes = estimateSceneBytes(project);
   if (usedBytes > profile.eepromBytes)
     fail(

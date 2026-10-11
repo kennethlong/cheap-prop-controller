@@ -23,6 +23,9 @@ interface Props {
   project: SceneProject;
   state: SceneState;
   selectedEvent: string | null;
+  selectedIrEvent: string | null;
+  onSelectIr(id: string | null): void;
+  onAddIr(atMs: number): void;
   onSelect(id: string | null): void;
   onEvents(events: TimelineEvent[]): void;
   position: number;
@@ -44,6 +47,7 @@ interface Props {
   distances: SimulatorSnapshot["distances"];
   distanceResetKey: number;
   previewAudio: SimulatorSnapshot["audio"];
+  irActivity: SimulatorSnapshot["irActivity"];
 }
 
 export function Timeline(props: Props) {
@@ -84,6 +88,18 @@ export function Timeline(props: Props) {
     (state.durationMs / 1000) * zoom,
   );
   const pixelsPerMs = width / state.durationMs;
+  // Nearby point events share rows only when their fixed-width labels fit.
+  const irPointWidth = 160;
+  const irRowEnds: number[] = [];
+  const irPoints = [...(state.irEvents ?? [])]
+    .sort((a, b) => a.atMs - b.atMs)
+    .map((event) => {
+      const left = event.atMs * pixelsPerMs;
+      let row = irRowEnds.findIndex((end) => left >= end);
+      if (row < 0) row = irRowEnds.length;
+      irRowEnds[row] = left + irPointWidth + 6;
+      return { event, row, left };
+    });
   const secondWidth = pixelsPerMs * 1000;
   const tickEvery =
     secondWidth > 70 ? 1 : secondWidth > 25 ? 2 : secondWidth > 12 ? 5 : 10;
@@ -271,6 +287,61 @@ export function Timeline(props: Props) {
               )}
             </div>
           </div>
+          {(project.ir?.enabled || (state.irEvents?.length ?? 0) > 0) && (
+            <div
+              className="output-lane ir-lane"
+              data-testid="ir-timeline-lane"
+              style={{ height: Math.max(1, irRowEnds.length) * 34 + 12 }}
+            >
+              <div className="lane-label">
+                <span>IR commands</span>
+              </div>
+              <div
+                className="lane-track"
+                style={{ backgroundSize: `${secondWidth * tickEvery}px 100%` }}
+                onDoubleClick={(event) => {
+                  if (
+                    event.target === event.currentTarget &&
+                    !props.running &&
+                    project.ir?.enabled &&
+                    project.ir.commands.length
+                  )
+                    props.onAddIr(
+                      Math.min(
+                        state.durationMs - 50,
+                        pointTime(event.clientX, event.currentTarget),
+                      ),
+                    );
+                }}
+              >
+                {irPoints.map(({ event, row, left }) => (
+                  <button
+                    key={event.id}
+                    className={`ir-point ${props.selectedIrEvent === event.id ? "selected" : ""}`}
+                    style={{ left, top: 6 + row * 34, width: irPointWidth }}
+                    aria-label={`IR ${project.ir?.commands.find((command) => command.id === event.commandId)?.name ?? "Missing command"} at ${event.atMs / 1000} seconds`}
+                    title={`${project.ir?.commands.find((command) => command.id === event.commandId)?.name ?? "Missing command"} · ${time(event.atMs)}`}
+                    onClick={() => props.onSelectIr(event.id)}
+                  >
+                    <span aria-hidden="true">◆</span>
+                    <span>
+                      {project.ir?.commands.find(
+                        (command) => command.id === event.commandId,
+                      )?.name ?? "Missing command"}
+                    </span>
+                  </button>
+                ))}
+                {!project.ir?.commands.length && (
+                  <span
+                    className="hint"
+                    style={{ padding: "10px", display: "block" }}
+                  >
+                    Learn a named command in Hardware to add IR events.
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
           {project.outputs.map((output) => (
             <div
               className={`output-lane ${props.activeOutputs[output.id] ? "active" : ""}`}
@@ -369,6 +440,24 @@ export function Timeline(props: Props) {
             <MousePointer2 size={13} />
             Drag in a lane to create an event. Select an event to adjust its
             timing.
+            {project.ir?.enabled && (
+              <button
+                className="ghost small"
+                disabled={props.running || !project.ir.commands.length}
+                title={
+                  !project.ir.commands.length
+                    ? "Learn a named command in Hardware first"
+                    : "Add an IR command at the playhead; double-click the IR lane to choose another time"
+                }
+                onClick={() =>
+                  props.onAddIr(
+                    Math.min(state.durationMs - 50, snap(props.position)),
+                  )
+                }
+              >
+                Add IR command
+              </button>
+            )}
           </div>
           <div
             className="playhead"
@@ -515,6 +604,23 @@ export function Timeline(props: Props) {
                 )?.name ?? `Track ${voice.track}`}{" "}
                 · {Math.round(voice.volume)}/30
               </span>
+            ))}
+          </div>
+        )}
+        {props.started && props.irActivity.length > 0 && (
+          <div
+            className="preview-ir-log"
+            role="log"
+            aria-label="Preview IR activity"
+          >
+            <strong className="small">
+              IR preview · no signals transmitted
+            </strong>
+            {props.irActivity.slice(-8).map((activity) => (
+              <div key={activity.sequence} data-testid="preview-ir-activity">
+                {time(activity.atMs)} · {activity.name} ·{" "}
+                {activity.source === "zone" ? "Distance zone" : "Timeline"}
+              </div>
             ))}
           </div>
         )}

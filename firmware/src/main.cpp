@@ -5,6 +5,7 @@
 #include "scene_image.hpp"
 #include "audio_engine.hpp"
 #include "zone_engine.hpp"
+#include "ir_engine.hpp"
 
 namespace {
 bool virtualMagic = false;
@@ -15,6 +16,7 @@ uint8_t readScene(uint16_t address) {
 cpc::SceneImage image{readScene};
 cpc::SceneRuntime engine;
 cpc::AudioEngine audio;
+cpc::IrEngine ir;
 cpc::DebouncedInput inputs[cpc::MaxTriggers];
 cpc::ZoneInput zones[cpc::MaxTriggers];
 uint8_t changedSensor = 255, exitedZone = 255, enteredZone = 255;
@@ -49,19 +51,22 @@ void ack(const __FlashStringHelper* command) {
 }
 void status(bool hello) {
   Serial.print(F("{\"type\":\"")); Serial.print(hello ? F("hello") : F("status"));
-  Serial.print(F("\",\"protocol\":1,\"firmware\":\"0.4.0\",\"board\":\"")); Serial.print(boardName());
+  Serial.print(F("\",\"protocol\":1,\"firmware\":\"0.5.0\",\"board\":\"")); Serial.print(boardName());
   Serial.print(F("\",\"capacity\":")); Serial.print(EEPROM.length());
   Serial.print(F(",\"valid\":")); Serial.print(validScene ? F("true") : F("false"));
   Serial.print(F(",\"running\":")); Serial.print(engine.running ? F("true") : F("false"));
   Serial.print(F(",\"state\":")); if (validScene) Serial.print(engine.currentState); else Serial.print(F("null"));
   Serial.print(F(",\"elapsed\":")); Serial.print(engine.running ? millis() - engine.enteredAt : 0);
   Serial.print(F(",\"outputs\":")); Serial.print(outputMask);
-  Serial.println(F(",\"audioFeedback\":false,\"audioFadeThrough\":true,\"audioAmbientMix\":true,\"distanceZones\":true}"));
+  Serial.println(F(",\"audioFeedback\":false,\"audioFadeThrough\":true,\"audioAmbientMix\":true,\"distanceZones\":true,\"irLearning\":true,\"irReplay\":true}"));
 }
 void stateChanged(uint32_t now) {
   // Use the state/action timestamp, even if serial logging crosses a millis
   // boundary. The same loop's audio.update must never precede this fade start.
   audio.enter(engine.currentState, now);
+  // IR quiet time starts when frame completion is observed, independently of
+  // the scene/action clock retained for ordered audio fades and timeline cues.
+  ir.enter(engine.currentState, now, millis());
   Serial.print(F("{\"type\":\"state\",\"state\":")); Serial.print(engine.currentState); Serial.println(F(",\"elapsed\":0}"));
 }
 void writeOutputs(uint32_t mask, bool force = false) {
@@ -76,7 +81,7 @@ void writeOutputs(uint32_t mask, bool force = false) {
   outputMask = mask;
 }
 void stop() {
-  engine.stop(); writeOutputs(0, true); audio.stop(millis());
+  engine.stop(); writeOutputs(0, true); audio.stop(millis()); ir.stop();
   if (validScene && sonarPhase == 1) digitalWrite(image.b(image.trigger(sonarIndex) + 1), LOW);
   sonarPhase = 0; changedSensor = 255;
 }
@@ -88,7 +93,7 @@ void resetZones() {
 }
 void setupScene() {
   const uint32_t now = millis();
-  engine.begin(&image); outputMask = 0; resetZones();
+  engine.begin(&image); outputMask = 0; resetZones(); ir.begin(&image);
   // Cache ownership so the echo timing loop never scans the EEPROM zone table.
   zoneSensorMask = 0;
   for (uint8_t i = 0; i < image.zoneCount(); ++i) zoneSensorMask |= 1 << image.b(image.zone(i));
@@ -112,6 +117,7 @@ void setupScene() {
   }
   audio.begin(&image, now);
   engine.run(now); audio.enter(engine.currentState, now);
+  ir.enter(engine.currentState, now);
   writeOutputs(engine.activeOutputs(now), true);
 }
 
@@ -131,7 +137,7 @@ void sonarMeasurement(bool hasEcho, uint32_t pulseUs) {
   sonarIndex = (sonarIndex + 1) % image.b(10);
 }
 void updateSonar() {
-  if (!validScene || !engine.running || !image.b(10)) return;
+  if (!validScene || !engine.running || !image.b(10) || ir.transmitting()) return;
   const uint32_t now = micros();
   if (!sonarPhase) {
     if (static_cast<int32_t>(now - sonarNext) < 0) return;
@@ -173,7 +179,8 @@ void zoneActions(uint8_t zone, bool entering, uint32_t now) {
   for (uint8_t i = 0; i < count && engine.running; ++i) {
     const uint16_t a = image.zoneAction(start + i);
     if (image.b(a) == 0) { engine.enter(image.b(a + 1), now); stateChanged(now); }
-    else audio.volume(image.b(a + 1), image.b(a + 2), image.u16(a + 4) * 50U, now);
+    else if (image.b(a) == 1) audio.volume(image.b(a + 1), image.b(a + 2), image.u16(a + 4) * 50U, now);
+    else ir.enqueue(image.b(a + 1));
   }
 }
 bool number(const char* input, uint32_t maximum, uint32_t& result) {
@@ -194,17 +201,47 @@ int8_t hexDigit(char c) {
   return -1;
 }
 void command() {
-  char* args[4] = {nullptr, nullptr, nullptr, nullptr};
+  char* args[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
   uint8_t count = 0;
   char* token = strtok(line, " ");
-  while (token && count < 4) { args[count++] = token; token = strtok(nullptr, " "); }
+  while (token && count < 6) { args[count++] = token; token = strtok(nullptr, " "); }
   if (!count) return;
   if (token) { error(F("Too many arguments")); return; }
   if (!strcmp(args[0], "HELLO") && count == 1) { status(true); return; }
   if (!strcmp(args[0], "STATUS") && count == 1) { status(false); return; }
   if (!strcmp(args[0], "STOP") && count == 1) { stop(); ack(F("STOP")); return; }
+  if (!strcmp(args[0], "IRLEARN") && count == 1) {
+    if (!validScene || uploading || !image.hasIr()) { error(F("Upload an IR-enabled scene before learning")); return; }
+    if (ir.busy() && !engine.running) { error(F("IR busy; send STOP first")); return; }
+    stop(); ir.learn(millis()); return; // One final capture/error response, no early ACK.
+  }
+  if (!strcmp(args[0], "IRBEGIN") && count == 6) {
+    if (!validScene || uploading || !image.hasIr()) { error(F("Upload an IR-enabled scene before testing")); return; }
+    if (ir.busy() && !engine.running) { error(F("IR busy; send STOP first")); return; }
+    uint32_t kind, pulses, repeats, gap, code;
+    if (!number(args[1], 1, kind) || !number(args[2], 127, pulses) || !number(args[3], 10, repeats) || !number(args[4], 2000, gap) || !number(args[5], 0xffffffffUL, code)
+        || !repeats || gap < 50 || gap % 50 || (!kind && pulses) || (kind && (pulses < 5 || !(pulses & 1) || code))) { error(F("Invalid IR test parameters")); return; }
+    stop(); ir.stage(kind, pulses, repeats, gap, code); ack(F("IRBEGIN")); return;
+  }
+  if (!strcmp(args[0], "IRDATA") && count == 3) {
+    uint32_t offset;
+    const size_t chars = strlen(args[2]); uint8_t values[32];
+    if (!ir.staging() || !number(args[1], 127, offset) || !chars || chars > 64 || chars % 2) { error(F("Invalid IR data offset or length")); return; }
+    for (uint8_t i = 0; i < chars / 2; ++i) {
+      const int8_t high = hexDigit(args[2][i * 2]), low = hexDigit(args[2][i * 2 + 1]);
+      if (high < 0 || low < 0) { error(F("Invalid IR data hex")); return; }
+      values[i] = (high << 4) | low;
+    }
+    if (!ir.data(offset, values, chars / 2)) { error(F("Invalid IR pulse data")); return; }
+    Serial.print(F("{\"type\":\"ack\",\"command\":\"IRDATA\",\"offset\":")); Serial.print(ir.stagedOffset()); Serial.println('}'); return;
+  }
+  if (!strcmp(args[0], "IRPLAY") && count == 1) {
+    if (!ir.play(millis())) { error(F("IR test is incomplete or invalid")); return; }
+    ack(F("IRPLAY")); return;
+  }
   if ((!strcmp(args[0], "RUN") || !strcmp(args[0], "RESET")) && count == 1) {
     if (!validScene || uploading) { error(F("No valid scene")); return; }
+    if (!engine.running && ir.busy()) { error(F("Finish IR training or send STOP first")); return; }
     const uint32_t now = millis();
     resetZones(); engine.run(now); writeOutputs(engine.activeOutputs(now), true); stateChanged(now);
     ack(!strcmp(args[0], "RUN") ? F("RUN") : F("RESET")); return;
@@ -278,6 +315,7 @@ void setup() {
 void loop() {
   serialInput();
   const uint32_t now = millis();
+  ir.update(now, audio.transportIdle(), sonarPhase == 0);
   if (validScene) {
     updateSonar();
     if (engine.trigger(readTriggerEdges(now), now)) stateChanged(now);
@@ -285,8 +323,17 @@ void loop() {
       changedSensor = 255;
       zoneActions(exitedZone, false, now); zoneActions(enteredZone, true, now);
     }
+    if (engine.running) ir.timeline(now);
     writeOutputs(engine.activeOutputs(now));
   }
-  audio.update(now, sonarPhase != 0);
+  ir.update(millis(), audio.transportIdle(), sonarPhase == 0);
+  if (!ir.transmitting()) audio.update(now, sonarPhase != 0);
+  const uint8_t capture = ir.pollLearn(now, micros(), audio.stopped());
+  if (capture == 1) {
+    Serial.print(F("{\"type\":\"ir-capture\",\"pulsesUs\":["));
+    for (uint8_t i = 0; i < ir.captureLength(); ++i) { if (i) Serial.print(','); Serial.print(ir.captureMicros(i)); }
+    Serial.println(F("]}"));
+  } else if (capture) error(capture == 4 ? F("IR learning timed out; press the remote button once") : capture == 3 ? F("IR capture overflow; command is too long") : F("IR capture invalid or repeat-only; press once again"));
+  if (ir.takeOverflow()) error(F("IR command queue full; space commands farther apart"));
   if (beginPending && audio.stopped()) { beginPending = false; ack(F("BEGIN")); }
 }

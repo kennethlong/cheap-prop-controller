@@ -1,4 +1,10 @@
-import type { BoardId, MediaTrack, SceneProject } from "./shared/model";
+import type {
+  BoardId,
+  IrCommand,
+  IrSignal,
+  MediaTrack,
+  SceneProject,
+} from "./shared/model";
 export interface PortInfo {
   path: string;
   manufacturer?: string;
@@ -15,12 +21,17 @@ export interface ProjectFile {
 export interface DeviceStatus {
   connected: boolean;
   port?: string;
+  hello?: DeviceReply;
 }
 export interface DesktopAPI {
   listPorts(): Promise<PortInfo[]>;
   connect(port: string): Promise<DeviceReply>;
   disconnect(): Promise<void>;
+  getDeviceStatus(): Promise<DeviceStatus>;
   deviceCommand(command: string): Promise<DeviceReply>;
+  learnIr(): Promise<IrSignal>;
+  testIr(command: IrCommand): Promise<DeviceReply>;
+  cancelIr(): Promise<DeviceReply>;
   uploadScene(bytes: number[]): Promise<DeviceReply>;
   flashFirmware(
     board: BoardId,

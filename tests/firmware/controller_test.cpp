@@ -10,6 +10,7 @@
 #include <EEPROM.h>
 
 static uint32_t fakeMillis = 0;
+static void (*afterPrint)() = nullptr;
 static uint8_t pins[70] = {};
 static const uint8_t LOW = 0, HIGH = 1, INPUT = 0, OUTPUT = 1, INPUT_PULLUP = 2;
 static uint32_t millis() { return fakeMillis; }
@@ -28,6 +29,7 @@ struct HostSerial {
   void print(const __FlashStringHelper* value) { print(reinterpret_cast<const char*>(value)); }
   template <typename T> void print(T value) {
     std::ostringstream out; out << value; text += out.str(); fakeMillis += printDelay;
+    if (afterPrint) afterPrint();
   }
   void print(uint8_t value) { print(static_cast<unsigned>(value)); }
   template <typename T> void println(T value) { print(value); text += '\n'; }
@@ -142,7 +144,90 @@ static void testResidentFadeTimestamp() {
   advance(5200); assert(volumeAt(Serial1, 20, 5000) == UINT32_MAX);
   advance(5500); assert(volumeAt(Serial1, 20, 5000) >= 5200);
 }
-int main() {
+static void loadIrFixture(const char* path) {
+  stop(); FILE* file = fopen(path, "rb"); assert(file);
+  const size_t size = fread(EEPROM.bytes, 1, sizeof(EEPROM.bytes), file); fclose(file);
+  assert(size >= 48 && image.valid(sizeof(EEPROM.bytes), EEPROM.bytes[8]) && image.hasIr());
+  Serial = HostSerial{}; fakeMillis = 0; validScene = true; uploading = virtualMagic = beginPending = false;
+  setupScene();
+}
+static void finishIrFrame() {
+  unsigned budget = 20000;
+  while (ir.transmitting() && budget--) {
+    if (cpc::irDriver::position & 1) cpc::irDriver::spaceDone(); else cpc::irDriver::carrierTick();
+  }
+  assert(budget);
+}
+static void finishDuringLogging() { if (fakeMillis >= 1090 && ir.transmitting()) finishIrFrame(); }
+static void installIrCommand() {
+  const uint16_t footer = image.irFooter(), length = image.u16(4) + 12;
+  memmove(EEPROM.bytes + footer + 12, EEPROM.bytes + footer, 16);
+  memset(EEPROM.bytes + footer, 0, 12);
+  EEPROM.bytes[footer + 1] = 38; EEPROM.bytes[footer + 2] = 1;
+  word(footer + 4, 0x00ff); word(footer + 6, 0x00ff); word(footer + 8, 100);
+  EEPROM.bytes[footer + 14] = 1; word(4, length); word(6, image.crc(length));
+  assert(image.valid(sizeof(EEPROM.bytes), EEPROM.bytes[8]));
+  ir.begin(&image); ir.enter(0, 0); assert(ir.enqueue(0));
+}
+static void testIrCompletionTimestamps(const char* emptyScene) {
+  loadIrFixture(emptyScene); installIrCommand(); fakeMillis = 1000;
+  // The first loop update starts a frame. A debounced button changes state,
+  // and the frame's ISR completes while that state report blocks on serial.
+  inputs[0].reset(false, 800); inputs[0].update(true, 850, 100);
+  pins[image.b(image.trigger(0) + 1)] = LOW;
+  Serial.printDelay = 30; afterPrint = finishDuringLogging;
+  loop(); afterPrint = nullptr; Serial.printDelay = 0;
+  assert(fakeMillis == 1090 && !ir.transmitting() && ir.busy());
+  fakeMillis = 1100; loop(); assert(ir.busy()); // Never shorten the physical gap to 10ms.
+  fakeMillis = 1189; loop(); assert(ir.busy());
+  fakeMillis = 1190; loop(); assert(!ir.busy());
+
+  loadIrFixture(emptyScene); installIrCommand(); fakeMillis = 1000;
+  ir.update(fakeMillis, true, true); assert(ir.transmitting());
+  Serial.printDelay = 30; afterPrint = finishDuringLogging;
+  stateChanged(1000); assert(fakeMillis == 1090 && !ir.transmitting());
+  stateChanged(1000); // A second ordered action observes the completed frame.
+  afterPrint = nullptr; Serial.printDelay = 0;
+  assert(fakeMillis == 1180); ir.update(fakeMillis, true, true); assert(ir.busy());
+  ir.update(1189, true, true); assert(ir.busy());
+  ir.update(1190, true, true); assert(!ir.busy());
+}
+static void testIrCommands(const char* emptyScene) {
+  fixture(); Serial.text.clear(); send("IRLEARN");
+  assert(Serial.text.find("Upload an IR-enabled scene") != std::string::npos && engine.running);
+  loadIrFixture(emptyScene);
+  uint8_t saved[4096]; memcpy(saved, EEPROM.bytes, sizeof(saved));
+  send("IRBEGIN 0 0 1 100 16711935"); assert(!engine.running && ir.staging());
+  assert(Serial.text.find("\"command\":\"IRBEGIN\"") != std::string::npos);
+  send("IRPLAY"); loop();
+  // IR waits until every audio STOP frame has drained, if the starter has audio.
+  for (uint32_t i = 0; i < 1000 && !ir.transmitting(); ++i) { ++fakeMillis; loop(); }
+  assert(ir.transmitting() && cpc::irDriver::pulseCount == 67);
+  send("STOP"); assert(!ir.transmitting() && !ir.busy() && !engine.running);
+  send("IRBEGIN 1 5 1 50 0"); send("IRDATA 0 0A140A"); assert(ir.stagedOffset() == 3);
+  send("IRDATA 0 140A"); assert(ir.stagedOffset() == 3);
+  send("IRPLAY"); assert(ir.staging());
+  send("IRDATA 3 140A"); send("IRPLAY");
+  for (uint32_t i = 0; i < 1000 && !ir.transmitting(); ++i) { ++fakeMillis; loop(); }
+  assert(ir.transmitting() && cpc::irDriver::pulseCount == 5); finishIrFrame();
+  loop(); assert(ir.busy()); fakeMillis += 50; loop(); assert(!ir.busy());
+  Serial.text.clear(); send("IRLEARN"); assert(!engine.running && ir.learning());
+  assert(Serial.text.empty()); // IRLEARN has no early success ACK.
+  for (uint32_t i = 0; i < 1000 && !cpc::irDriver::capture.active; ++i) { ++fakeMillis; loop(); }
+  assert(cpc::irDriver::capture.active);
+  uint32_t stamp = micros() + 20000; cpc::irDriver::capture.edge(false, stamp);
+  const uint8_t values[] = {180, 90, 11, 34, 11};
+  for (uint8_t i = 0; i < 5; ++i) { stamp += values[i] * 50; cpc::irDriver::capture.edge(!(i & 1), stamp); }
+  fakeMillis = (stamp + 15000 + 999) / 1000; loop();
+  assert(Serial.text.find("\"pulsesUs\":[9000,4500,550,1700,550]") != std::string::npos);
+  assert(!engine.running && !ir.learning());
+  send("IRLEARN"); loop(); send("STOP");
+  assert(!cpc::irDriver::capture.active && !ir.learning());
+  Serial.text.clear(); fakeMillis += 11000; loop(); assert(Serial.text.empty()); // No stale capture after cancel.
+  assert(!memcmp(saved, EEPROM.bytes, sizeof(saved))); // Training/testing is entirely in RAM.
+}
+int main(int argc, char** argv) {
   testOrderedActionTimestamps(); testCommandsAndResetBaseline(); testResidentFadeTimestamp();
-  puts("Controller host tests passed: ordered action timestamps, serial logging delay, zone trigger rejection, legacy trigger, RESET/RUN baseline, STOP cancellation.");
+  if (argc > 1) { testIrCommands(argv[1]); testIrCompletionTimestamps(argv[1]); }
+  puts("Controller host tests passed: ordered action timestamps, serial logging delay, zone trigger rejection, legacy trigger, RESET/RUN baseline, IR learning/staged playback/EEPROM preservation, STOP cancellation.");
 }

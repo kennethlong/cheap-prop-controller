@@ -49,6 +49,9 @@ export const BOARD_PROFILES: Record<BoardId, BoardProfile> = {
 };
 
 export const SHIELD_PINS = [7, 6, 5, 4] as const;
+export function irPins(board: BoardId) {
+  return { rxPin: 2, txPin: board === "mega" ? 11 : 9 };
+}
 
 export interface AllocationResult {
   project: SceneProject;
@@ -59,7 +62,7 @@ export interface AllocationResult {
   maxOutputs: number;
 }
 
-/** Reallocate deterministically: fixed shield pins, audio, triggers, then outputs. */
+/** Reserve fixed shield/IR pins, then audio, triggers, and ordinary outputs. */
 export function allocatePins(project: SceneProject): AllocationResult {
   const result = structuredClone(project);
   const profile = BOARD_PROFILES[result.board];
@@ -81,6 +84,15 @@ export function allocatePins(project: SceneProject): AllocationResult {
   };
   if (result.wiring === "relay-shield") {
     SHIELD_PINS.forEach((pin) => used.add(pin));
+  }
+  if (result.ir) {
+    const fixed = irPins(result.board);
+    result.ir.txPin = result.ir.enabled ? fixed.txPin : null;
+    result.ir.rxPin = result.ir.enabled ? fixed.rxPin : null;
+    if (result.ir.enabled) {
+      used.add(fixed.txPin);
+      used.add(fixed.rxPin);
+    }
   }
   result.audio.players.forEach((player, index) => {
     if (profile.uartPairs.length) {

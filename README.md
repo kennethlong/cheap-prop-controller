@@ -4,7 +4,7 @@ A desktop scene editor and autonomous Arduino controller for relay-driven props,
 
 ## Run the application
 
-On this Windows machine, double-click **Start Controller.cmd**. It launches the packaged application when available, or the built Electron app otherwise. Windows builds are in `release/`, including the portable app and **Cheap Prop Controller Setup 0.5.0.exe** in `release/0.5.0/`. The installer defaults to your user account, lets you select an installation folder, and creates Desktop and Start Menu shortcuts.
+On this Windows machine, double-click **Start Controller.cmd**. It launches the packaged application when available, or the built Electron app otherwise. Windows builds are in `release/`, including the portable app and **Cheap Prop Controller Setup 0.6.0.exe** in `release/0.6.0/`. The installer defaults to your user account, lets you select an installation folder, and creates Desktop and Start Menu shortcuts.
 
 The starter project has eight outputs, three button triggers, and Idle → Approach → Scare → Idle transitions. It contains no audio files and uses 172 bytes of scene storage. Opening the serial connection resets an Uno, which starts its saved initial state again.
 
@@ -22,19 +22,43 @@ The device console exposes physical trigger injection and status. A physical tri
 
 Installed copies keep projects in `Documents/Cheap Prop Controller/Projects` by default, outside the installation folder that is replaced or removed during upgrades/uninstall. Uninstall keeps the app's preferences and external scene folders. Avoid saving projects in the installed program directory. For custom launchers, set the absolute `CPC_PROJECTS_DIRECTORY` environment variable to choose a default project library. A remembered project folder still takes precedence.
 
-Four editable projects are in `examples/`: the eight-output starter, an Uno scene with single-player fade transitions, a Mega scene with PIR, HC-SR04, reset button, and three audio players, and an Uno scene with four ultrasonic distance zones. The audio examples have numbered track slots without included MP3s; use each track's **Replace / link file** action in Media to attach your files while preserving state assignments.
+Five editable projects are in `examples/`: the eight-output starter, an Uno scene with single-player fade transitions, a Mega scene with PIR, HC-SR04, reset button, and three audio players, an Uno scene with four ultrasonic distance zones, and an IR learning starter with an empty command library. The audio examples have numbered track slots without included MP3s; use each track's **Replace / link file** action in Media to attach your files while preserving state assignments.
 
 ## Ultrasonic distance zones
 
 In **Hardware**, select **HC-SR04** for a trigger and choose **Distance zones**. Add named ranges and their **On enter / On exit** actions. Each range includes both endpoints (for example, 2–40 cm and 41–100 cm); ranges on one sensor cannot overlap, and gaps are allowed. All zones share that sensor's TRIG/ECHO pins. The app supports up to 32 active zones and 64 actions across the scene, subject to its displayed EEPROM capacity.
 
-A zone action can **Change state** or **Set audio volume** for ambient or foreground playback. Actions execute in the listed order, with old-zone exit actions before new-zone entry actions. Place a state change before a volume adjustment when the adjustment should affect the destination state. Volume actions preserve the current track's position, including at volume zero, and have their own fade duration. They do not start absent audio. The next state entry restores the scene's configured audio levels. IR commands and continuous distance-to-volume mapping are not part of this release.
+A zone action can **Change state**, **Set audio volume** for ambient or foreground playback, or **Send IR command** from the learned library. Actions execute in the listed order, with old-zone exit actions before new-zone entry actions. Place a state change before a volume adjustment or IR command when the action should apply to the destination state. Volume actions preserve the current track's position, including at volume zero, and have their own fade duration. They do not start absent audio. The next state entry restores the scene's configured audio levels. Continuous distance-to-volume mapping is not part of this release.
 
 The current zone remains active through its configured release margin on both ends, preventing chatter at boundaries. A different range must remain stable for the sensor's debounce interval. The first valid reading after startup/reset establishes a zone without firing actions; later crossings fire once. Invalid/no-echo readings hold the last zone and cancel a pending change. Skipping over a zone does not fire its actions. Normal state changes do not rearm the sensor; STOP cancels pending actions. Multiple ultrasonic sensors are sampled sequentially, so distance response is slower than the 50 ms output timeline tick.
 
 On **Scene**, start preview and use each ultrasonic sensor's distance input/slider or **No echo** button. The preview displays the current zone and audio levels. Older projects keep single-threshold behavior. Switching between threshold and zone mode preserves the saved configuration; legacy per-state mappings for a zoned sensor are inactive until threshold mode is restored.
 
 Distance zones require firmware **0.4.0** with the `distanceZones` capability. Upload checks support before modifying controller storage. The four-zone Uno example uses 268 bytes; zones add 8 bytes per extended image, 10 per zone, and 6 per action. Scenes without active zones retain their existing binary representation.
+
+## Learn and replay IR remote buttons
+
+The **Hardware → IR remote commands** library gives captured buttons names such as “Candles on,” “Dim one step,” and “Candles off.” Names and captured signals are saved in the project. A name refers to the same command when used in timeline cues and distance-zone actions; renaming preserves those references.
+
+1. Enable IR remote control, check the updated pin assignments, and upload the scene. An empty library is valid; `examples/ir-learning-starter.cpc.json` provides that starting point. Install firmware **0.5.0** first. Learning/testing requires an uploaded IR-enabled scene so it cannot silently repurpose a pin assigned to another device.
+2. Connect the receiver/transmitter and choose **Learn IR command**. Learning stops the physical scene and waits up to ten seconds for one complete button press. Point the original remote at the receiver, then press and release the button. Cancel or STOP leaves the controller stopped.
+3. Give the capture a name. Use **Test captured command**, observe the target device, then save it to the library. A serial acknowledgement means the test was accepted; the controller cannot confirm whether the candle responded. Save the project to retain the library.
+4. Add a named IR cue at a time on a state's IR lane, or select **Send IR command** in a distance zone's entry/exit actions. Upload the scene again to use the saved commands autonomously. Desktop preview logs requested commands without transmitting them or simulating the physical send queue; queueing and state changes can delay or cancel transmission.
+
+The [Adafruit 5990 transceiver](https://learn.adafruit.com/adafruit-infrared-ir-remote-transceiver/pinouts) has separate receiver **IRin** and transmitter **IRout** signals. For the supported 5 V boards, connect VIN to a suitable 5 V supply and GND to common ground. Its emitter can draw about 400 mA while pulsing. The receiver targets 38 kHz remote signals; it does not measure the carrier frequency. Our pin assignments are:
+
+| Board | Module IRin → Arduino receiver | Module IRout → Arduino transmitter |
+|---|---|---|
+| Uno, classic Nano, 5 V/16 MHz Pro Mini | D2 | D9 |
+| Mega 2560 | D2 | D11 |
+
+Both pins are reserved before allocating audio, triggers, and prop outputs. IR uses Timer1; its PWM/servo functions are unavailable while IR is enabled. The firmware retains Timer2 for the Uno-family MP3 UART and Timer0 for timekeeping. It sends IR with a hardware carrier and nonblocking envelope scheduling, rather than calling a blocking library sender. Actual optical range and coexistence with connected sensors/audio still require bench verification.
+
+The app recognizes NEC-style 32-bit frames and stores them compactly. Other supported captures retain a raw pattern of 5–127 alternating pulses, quantized to 50 μs, at most 200 ms per frame. Raw playback assumes 38 kHz and must be tested with the target. Long, unusual, different-carrier, rolling-code, or toggle-bit protocols are not guaranteed. Learning a “Dim” button reproduces that button; it does not discover absolute brightness percentages.
+
+Each command can send 1–10 complete presses with a 50–2,000 ms gap. This gap also separates successive queued commands; it is not a protocol-specific held-button repeat. IR cues are points, not relay on/off intervals. Cues at time zero run on state entry; looping timelines repeat them. Commands transmit in order, with room for eight waiting commands plus the active command. Closely spaced cues may run late; the editor warns about scheduled overlap, and firmware reports queue overflow. A state change discards obsolete queued cues; an active frame may finish. STOP aborts transmission and clears the queue.
+
+The app supports up to 32 named commands and 128 timed IR cues, subject to the board's displayed scene capacity. IR adds a 16-byte extension footer/descriptor, 12 bytes per command, four bytes per timed cue, and one byte per raw pulse; zones share the extension. An empty IR starter uses 188 bytes on Uno. Names remain on the computer. Disabled, unused libraries do not consume EEPROM. Scenes without IR retain their earlier binary format. Upload preflight requires `irReplay:true` before writing an IR scene, and learning requires `irLearning:true`.
 
 ## Boards and storage
 

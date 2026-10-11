@@ -15,6 +15,7 @@ class AudioEngine {
   } players[MaxPlayers];
   uint8_t count = 0, packet[10], packetSize = 0, packetIndex = 0, packetPlayer = 0, scan = 0;
   uint8_t pendingState = 0;
+  uint8_t transmitted = 0;
   int8_t ambientPlayer = -1, foregroundPlayer = -1;
   uint8_t ambientOverride = 255, foregroundOverride = 255;
   uint16_t ambientOverrideMs = 0, foregroundOverrideMs = 0;
@@ -26,6 +27,7 @@ class AudioEngine {
 #if defined(__AVR_ATmega2560__)
     HardwareSerial* port = index == 0 ? &Serial1 : index == 1 ? &Serial2 : &Serial3;
     if (!port->availableForWrite()) return false;
+    transmitted |= 1 << index;
     port->write(value);
     return true;
 #else
@@ -154,6 +156,17 @@ class AudioEngine {
       foregroundVolume, foregroundDuration, now, false, true);
   }
  public:
+  bool transportIdle() const {
+    if (packetIndex < packetSize) return false;
+#if !defined(__AVR_ATmega2560__)
+    if (timerUart::busy()) return false;
+#elif defined(ARDUINO)
+    if ((transmitted & 1) && !(UCSR1A & _BV(TXC1))) return false;
+    if ((transmitted & 2) && !(UCSR2A & _BV(TXC2))) return false;
+    if ((transmitted & 4) && !(UCSR3A & _BV(TXC3))) return false;
+#endif
+    return true;
+  }
   bool stopped() const {
     if (fadeThroughPending) return false;
     if (packetIndex < packetSize) return false;
@@ -172,7 +185,7 @@ class AudioEngine {
 #if !defined(__AVR_ATmega2560__)
     timerUart::begin();
 #endif
-    image = source; count = image->b(11); packetSize = packetIndex = scan = 0;
+    image = source; count = image->b(11); packetSize = packetIndex = scan = transmitted = 0;
     ambientPlayer = foregroundPlayer = -1;
     ambientOverride = foregroundOverride = 255;
     fadeThroughPending = false;
