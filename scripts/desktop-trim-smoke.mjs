@@ -92,7 +92,9 @@ const checks = [];
 let screenshot;
 try {
   const version = await desktop.evaluate(({ app }) => app.getVersion());
-  expect(version).toBe("0.4.1");
+  expect(version).toBe(
+    JSON.parse(await readFile("package.json", "utf8")).version,
+  );
   const page = await desktop.firstWindow();
   page.on("pageerror", (error) => errors.push(error.message));
   await desktop.evaluate(

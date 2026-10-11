@@ -4,7 +4,7 @@ A desktop scene editor and autonomous Arduino controller for relay-driven props,
 
 ## Run the application
 
-On this Windows machine, double-click **Start Controller.cmd**. It launches the packaged application when available, or the built Electron app otherwise. Windows builds are in `release/`, including the portable app and **Cheap Prop Controller Setup 0.4.1.exe** in `release/0.4.1/`. The installer defaults to your user account, lets you select an installation folder, and creates Desktop and Start Menu shortcuts.
+On this Windows machine, double-click **Start Controller.cmd**. It launches the packaged application when available, or the built Electron app otherwise. Windows builds are in `release/`, including the portable app and **Cheap Prop Controller Setup 0.5.0.exe** in `release/0.5.0/`. The installer defaults to your user account, lets you select an installation folder, and creates Desktop and Start Menu shortcuts.
 
 The starter project has eight outputs, three button triggers, and Idle → Approach → Scare → Idle transitions. It contains no audio files and uses 172 bytes of scene storage. Opening the serial connection resets an Uno, which starts its saved initial state again.
 
@@ -22,7 +22,19 @@ The device console exposes physical trigger injection and status. A physical tri
 
 Installed copies keep projects in `Documents/Cheap Prop Controller/Projects` by default, outside the installation folder that is replaced or removed during upgrades/uninstall. Uninstall keeps the app's preferences and external scene folders. Avoid saving projects in the installed program directory. For custom launchers, set the absolute `CPC_PROJECTS_DIRECTORY` environment variable to choose a default project library. A remembered project folder still takes precedence.
 
-Three editable projects are in `examples/`: the eight-output starter, an Uno scene with single-player fade transitions, and a Mega scene with PIR, HC-SR04, reset button, and three audio players. The audio examples have numbered track slots without included MP3s; use each track's **Replace / link file** action in Media to attach your files while preserving state assignments.
+Four editable projects are in `examples/`: the eight-output starter, an Uno scene with single-player fade transitions, a Mega scene with PIR, HC-SR04, reset button, and three audio players, and an Uno scene with four ultrasonic distance zones. The audio examples have numbered track slots without included MP3s; use each track's **Replace / link file** action in Media to attach your files while preserving state assignments.
+
+## Ultrasonic distance zones
+
+In **Hardware**, select **HC-SR04** for a trigger and choose **Distance zones**. Add named ranges and their **On enter / On exit** actions. Each range includes both endpoints (for example, 2–40 cm and 41–100 cm); ranges on one sensor cannot overlap, and gaps are allowed. All zones share that sensor's TRIG/ECHO pins. The app supports up to 32 active zones and 64 actions across the scene, subject to its displayed EEPROM capacity.
+
+A zone action can **Change state** or **Set audio volume** for ambient or foreground playback. Actions execute in the listed order, with old-zone exit actions before new-zone entry actions. Place a state change before a volume adjustment when the adjustment should affect the destination state. Volume actions preserve the current track's position, including at volume zero, and have their own fade duration. They do not start absent audio. The next state entry restores the scene's configured audio levels. IR commands and continuous distance-to-volume mapping are not part of this release.
+
+The current zone remains active through its configured release margin on both ends, preventing chatter at boundaries. A different range must remain stable for the sensor's debounce interval. The first valid reading after startup/reset establishes a zone without firing actions; later crossings fire once. Invalid/no-echo readings hold the last zone and cancel a pending change. Skipping over a zone does not fire its actions. Normal state changes do not rearm the sensor; STOP cancels pending actions. Multiple ultrasonic sensors are sampled sequentially, so distance response is slower than the 50 ms output timeline tick.
+
+On **Scene**, start preview and use each ultrasonic sensor's distance input/slider or **No echo** button. The preview displays the current zone and audio levels. Older projects keep single-threshold behavior. Switching between threshold and zone mode preserves the saved configuration; legacy per-state mappings for a zoned sensor are inactive until threshold mode is restored.
+
+Distance zones require firmware **0.4.0** with the `distanceZones` capability. Upload checks support before modifying controller storage. The four-zone Uno example uses 268 bytes; zones add 8 bytes per extended image, 10 per zone, and 6 per action. Scenes without active zones retain their existing binary representation.
 
 ## Boards and storage
 

@@ -185,6 +185,54 @@ describe("serial upload and priority controls", () => {
     await service.disconnect();
   });
 
+  it("requires explicit distance-zone support before changing controller storage", async () => {
+    const { service, port } = await connected();
+    const project = createDefaultProject();
+    Object.assign(project.triggers[0], {
+      kind: "ultrasonic",
+      activeLow: false,
+      pullup: false,
+      distanceMode: "zones",
+      zones: [
+        {
+          id: "near",
+          name: "Near",
+          minCm: 2,
+          maxCm: 100,
+          hysteresisCm: 10,
+          onEnter: [{ id: "approach", kind: "state", stateId: "approach" }],
+          onExit: [],
+        },
+      ],
+    });
+    const values = [...compileProject(synchronizeAudioPlayers(project)).bytes];
+    expect(values.length).toBeGreaterThan(32);
+    for (const distanceZones of [undefined, false, "true"]) {
+      port.onWrite = () => port.reply({ ...hello, distanceZones });
+      const denied = failure(service.upload(values));
+      await flush();
+      expect(String(await denied)).toContain("ultrasonic distance zones");
+      expect(port.writes.some((command) => command.startsWith("BEGIN "))).toBe(
+        false,
+      );
+    }
+    port.onWrite = (command) => {
+      if (command === "HELLO") port.reply({ ...hello, distanceZones: true });
+      else if (command.startsWith("DATA ")) {
+        const [, offset, data] = command.split(" ");
+        port.reply({
+          type: "ack",
+          command: "DATA",
+          offset: Number(offset) + data.length / 2,
+        });
+      } else port.reply({ type: "ack", command: command.split(" ")[0] });
+    };
+    const accepted = service.upload(values);
+    await flush();
+    expect(await accepted).toEqual({ type: "ack", command: "COMMIT" });
+    await service.disconnect();
+  });
+
   it("uploads valid images in acknowledged chunks and commits only after the last chunk", async () => {
     const { service, port } = await connected();
     port.onWrite = (command) => {

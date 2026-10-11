@@ -372,7 +372,9 @@ try {
     },
   });
   evidence.version = await desktop.evaluate(({ app }) => app.getVersion());
-  expect(evidence.version).toBe("0.4.1");
+  expect(evidence.version).toBe(
+    JSON.parse(await readFile("package.json", "utf8")).version,
+  );
   page = await desktop.firstWindow();
   page.on("pageerror", (error) => evidence.errors.push(error.message));
   await desktop.evaluate(({ BrowserWindow, dialog }, file) => {

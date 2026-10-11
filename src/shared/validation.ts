@@ -1,5 +1,10 @@
 import { BOARD_PROFILES, requiredPlayerCount, SHIELD_PINS } from "./boards";
-import { LIMITS, type SceneProject, type ValidationIssue } from "./model";
+import {
+  isZonedTrigger,
+  LIMITS,
+  type SceneProject,
+  type ValidationIssue,
+} from "./model";
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -85,6 +90,50 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
     number(trigger.debounceMs, `${path}.debounceMs`);
     number(trigger.thresholdCm, `${path}.thresholdCm`);
     number(trigger.hysteresisCm, `${path}.hysteresisCm`);
+    if (trigger.distanceMode !== undefined)
+      enumeration(
+        trigger.distanceMode,
+        ["threshold", "zones"],
+        `${path}.distanceMode`,
+      );
+    if (trigger.zones !== undefined)
+      array(trigger.zones, `${path}.zones`, 256).forEach(
+        (candidate, zoneIndex) => {
+          const zonePath = `${path}.zones.${zoneIndex}`;
+          const zone = object(candidate, zonePath);
+          if (!zone) return;
+          text(zone.id, `${zonePath}.id`);
+          text(zone.name, `${zonePath}.name`);
+          number(zone.minCm, `${zonePath}.minCm`);
+          number(zone.maxCm, `${zonePath}.maxCm`);
+          number(zone.hysteresisCm, `${zonePath}.hysteresisCm`);
+          for (const edge of ["onEnter", "onExit"] as const)
+            array(zone[edge], `${zonePath}.${edge}`, 256).forEach(
+              (entry, actionIndex) => {
+                const actionPath = `${zonePath}.${edge}.${actionIndex}`;
+                const action = object(entry, actionPath);
+                if (!action) return;
+                text(action.id, `${actionPath}.id`);
+                enumeration(
+                  action.kind,
+                  ["state", "volume"],
+                  `${actionPath}.kind`,
+                );
+                if (action.kind === "state")
+                  text(action.stateId, `${actionPath}.stateId`);
+                if (action.kind === "volume") {
+                  enumeration(
+                    action.target,
+                    ["ambient", "foreground"],
+                    `${actionPath}.target`,
+                  );
+                  number(action.volume, `${actionPath}.volume`);
+                  number(action.fadeMs, `${actionPath}.fadeMs`);
+                }
+              },
+            );
+        },
+      );
   });
   const audio = object(project.audio, "audio");
   if (audio) {
@@ -178,8 +227,21 @@ export function parseProject(value: unknown): SceneProject {
 }
 
 export function estimateSceneBytes(project: SceneProject): number {
+  const zones = project.triggers
+    .filter(isZonedTrigger)
+    .flatMap((trigger) => trigger.zones ?? []);
+  const zoneBytes = zones.length
+    ? 8 +
+      zones.length * 10 +
+      zones.reduce(
+        (sum, zone) => sum + zone.onEnter.length + zone.onExit.length,
+        0,
+      ) *
+        6
+    : 0;
   return (
     32 +
+    zoneBytes +
     project.outputs.length * 2 +
     project.triggers.length * 8 +
     project.audio.players.length * 4 +
@@ -234,6 +296,9 @@ export function validateProject(value: unknown): ValidationIssue[] {
   uniqueIds(project.triggers, "triggers");
   uniqueIds(project.audio.players, "audio.players");
   uniqueIds(project.states, "states");
+  const stateIds = new Set(project.states.map((state) => state.id));
+  let totalZones = 0;
+  let totalZoneActions = 0;
   const profile = BOARD_PROFILES[project.board];
   const used = new Map<number, string>();
   const claimPin = (pin: number | null, path: string) => {
@@ -296,7 +361,72 @@ export function validateProject(value: unknown): ValidationIssue[] {
         );
     } else if (trigger.echoPin !== null)
       fail(`${path}.echoPin`, "Only ultrasonic sensors use an echo pin.");
+    // Inactive zone presets remain editable without changing their binary image.
+    if (isZonedTrigger(trigger)) {
+      const zones = trigger.zones ?? [];
+      integer(zones.length, 1, LIMITS.zones, `${path}.zones`);
+      uniqueIds(zones, `${path}.zones`);
+      totalZones += zones.length;
+      zones.forEach((zone, zoneIndex) => {
+        const zonePath = `${path}.zones.${zoneIndex}`;
+        nonempty(zone.name, `${zonePath}.name`);
+        integer(zone.minCm, 2, 400, `${zonePath}.minCm`);
+        integer(zone.maxCm, 2, 400, `${zonePath}.maxCm`);
+        integer(zone.hysteresisCm, 1, 255, `${zonePath}.hysteresisCm`);
+        if (zone.maxCm < zone.minCm)
+          fail(zonePath, "Zone end must be at or beyond its beginning.");
+        if (
+          zones
+            .slice(0, zoneIndex)
+            .some(
+              (other) => zone.minCm <= other.maxCm && other.minCm <= zone.maxCm,
+            )
+        )
+          fail(
+            zonePath,
+            "Distance ranges for the same sensor cannot overlap. Both endpoints are included.",
+          );
+        for (const edge of ["onEnter", "onExit"] as const) {
+          uniqueIds(zone[edge], `${zonePath}.${edge}`);
+          totalZoneActions += zone[edge].length;
+          zone[edge].forEach((action, actionIndex) => {
+            const actionPath = `${zonePath}.${edge}.${actionIndex}`;
+            if (action.kind === "state") {
+              if (!stateIds.has(action.stateId))
+                fail(`${actionPath}.stateId`, "Target state does not exist.");
+            } else {
+              integer(action.volume, 0, 30, `${actionPath}.volume`);
+              ticks(action.fadeMs, 0, 12750, `${actionPath}.fadeMs`);
+              if (
+                action.target === "ambient" &&
+                project.audio.ambientTrack === null
+              )
+                fail(
+                  actionPath,
+                  "No ambient track is configured; this volume action has no effect.",
+                  "warning",
+                );
+              if (
+                action.target === "foreground" &&
+                !project.states.some(
+                  (state) =>
+                    state.id !== project.initialStateId &&
+                    state.foregroundTrack !== null,
+                )
+              )
+                fail(
+                  actionPath,
+                  "No foreground tracks are configured; this volume action has no effect.",
+                  "warning",
+                );
+            }
+          });
+        }
+      });
+    }
   });
+  integer(totalZones, 0, LIMITS.zones, "distanceZones");
+  integer(totalZoneActions, 0, LIMITS.zoneActions, "zoneActions");
   project.audio.players.forEach((player, index) => {
     const path = `audio.players.${index}`;
     claimPin(player.txPin, `${path}.txPin`);
@@ -425,6 +555,17 @@ export function validateProject(value: unknown): ValidationIssue[] {
       const transitionPath = `${path}.transitions.${index}`;
       if (!triggers.has(transition.triggerId))
         fail(`${transitionPath}.triggerId`, "Trigger does not exist.");
+      if (
+        project.triggers.some(
+          (trigger) =>
+            trigger.id === transition.triggerId && isZonedTrigger(trigger),
+        )
+      )
+        fail(
+          transitionPath,
+          "This sensor uses distance-zone actions. Its single-threshold transition is inactive until threshold mode is restored.",
+          "warning",
+        );
       if (!states.has(transition.targetStateId))
         fail(`${transitionPath}.targetStateId`, "Target state does not exist.");
       if (transitionTriggers.has(transition.triggerId))

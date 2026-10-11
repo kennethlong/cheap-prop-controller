@@ -10,6 +10,8 @@ import {
   ZoomOut,
 } from "lucide-react";
 import type { SceneProject, SceneState, TimelineEvent } from "../shared/model";
+import { isZonedTrigger } from "../shared/model";
+import type { SimulatorSnapshot } from "../shared/simulator";
 
 export const time = (ms: number) =>
   `${Math.floor(ms / 60000)
@@ -38,10 +40,22 @@ interface Props {
   previewState: string;
   onTrigger(id: string): void;
   enabledTriggers: string[];
+  onDistance(id: string, distanceCm: number | null): void;
+  distances: SimulatorSnapshot["distances"];
+  distanceResetKey: number;
+  previewAudio: SimulatorSnapshot["audio"];
 }
 
 export function Timeline(props: Props) {
   const { project, state } = props;
+  const [distanceText, setDistanceText] = useState<Record<string, string>>({});
+  useEffect(() => setDistanceText({}), [props.distanceResetKey]);
+  const setDistance = (id: string, text: string) => {
+    // Keep partial numbers editable (typing 100 begins with out-of-range 1).
+    // The simulator treats incomplete/invalid readings as no echo.
+    setDistanceText((current) => ({ ...current, [id]: text }));
+    props.onDistance(id, text === "" ? null : Number(text));
+  };
   const [zoom, setZoom] = useState(32);
   const [viewport, setViewport] = useState(600);
   const [labelWidth, setLabelWidth] = useState(
@@ -381,20 +395,129 @@ export function Timeline(props: Props) {
         </div>
         <div className="toolbar-separator" />
         <div className="preview-buttons">
-          {project.triggers.map((trigger) => (
-            <button
-              key={trigger.id}
-              disabled={
-                !props.started || !props.enabledTriggers.includes(trigger.id)
-              }
-              title={`Simulate ${trigger.name}`}
-              onClick={() => props.onTrigger(trigger.id)}
-            >
-              {trigger.name}
-            </button>
-          ))}
+          {project.triggers
+            .filter((trigger) => !isZonedTrigger(trigger))
+            .map((trigger) => (
+              <button
+                key={trigger.id}
+                disabled={
+                  !props.started || !props.enabledTriggers.includes(trigger.id)
+                }
+                title={`Simulate ${trigger.name}`}
+                onClick={() => props.onTrigger(trigger.id)}
+              >
+                {trigger.name}
+              </button>
+            ))}
         </div>
         <span className="hint">Triggers here affect preview only.</span>
+        {project.triggers.some((trigger) => trigger.kind === "ultrasonic") && (
+          <div className="distance-previews">
+            {project.triggers
+              .filter((trigger) => trigger.kind === "ultrasonic")
+              .map((trigger) => {
+                const reading = props.distances[trigger.id];
+                return (
+                  <div
+                    key={trigger.id}
+                    className="distance-preview"
+                    role="group"
+                    aria-label={`${trigger.name} distance preview`}
+                  >
+                    <div className="row between">
+                      <strong className="small">{trigger.name}</strong>
+                      <span
+                        className="small"
+                        data-testid={`distance-zone-${trigger.id}`}
+                      >
+                        {isZonedTrigger(trigger)
+                          ? `Zone: ${reading?.zoneName ?? "None"}`
+                          : "Single threshold"}
+                      </span>
+                    </div>
+                    <div className="row">
+                      <label>
+                        Distance (cm)
+                        <input
+                          aria-label={`${trigger.name} preview distance`}
+                          type="number"
+                          min="2"
+                          max="400"
+                          step="1"
+                          disabled={!props.started}
+                          value={
+                            distanceText[trigger.id] ??
+                            reading?.distanceCm ??
+                            ""
+                          }
+                          placeholder="No echo"
+                          onChange={(event) =>
+                            setDistance(trigger.id, event.target.value)
+                          }
+                        />
+                      </label>
+                      <input
+                        aria-label={`${trigger.name} distance slider`}
+                        type="range"
+                        min="2"
+                        max="400"
+                        step="1"
+                        disabled={!props.started}
+                        value={reading?.distanceCm ?? 400}
+                        onChange={(event) =>
+                          setDistance(trigger.id, event.target.value)
+                        }
+                      />
+                      <button
+                        className="small"
+                        disabled={!props.started}
+                        aria-label={`${trigger.name} no echo`}
+                        onClick={() => setDistance(trigger.id, "")}
+                      >
+                        No echo
+                      </button>
+                    </div>
+                    <p className="hint">
+                      {reading?.distanceCm == null
+                        ? isZonedTrigger(trigger)
+                          ? "No echo: the last zone stays active."
+                          : "No echo: the threshold input releases."
+                        : `Hold the distance for ${trigger.debounceMs} ms to confirm a change.`}
+                    </p>
+                  </div>
+                );
+              })}
+            {project.triggers.some(isZonedTrigger) && (
+              <p className="hint">
+                Start preview, then choose a starting distance. The first
+                reading establishes a zone without firing actions. Move beyond
+                its release margin to cross into another zone.
+              </p>
+            )}
+          </div>
+        )}
+        {props.started && props.previewAudio.length > 0 && (
+          <div
+            className="preview-audio-levels"
+            aria-label="Preview audio levels"
+          >
+            {props.previewAudio.map((voice) => (
+              <span
+                key={voice.playerIndex}
+                data-testid={`preview-audio-${voice.role}-${voice.playerIndex}`}
+                data-volume={voice.volume}
+                data-position-ms={voice.positionMs}
+                className="badge"
+              >
+                {voice.role === "ambient" ? "Ambient" : "Foreground"} ·{" "}
+                {project.audio.tracks.find(
+                  (track) => track.number === voice.track,
+                )?.name ?? `Track ${voice.track}`}{" "}
+                · {Math.round(voice.volume)}/30
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     </>
   );

@@ -3,7 +3,7 @@
 #include "primitives.hpp"
 
 namespace cpc {
-enum { HeaderSize = 32, MaxOutputs = 32, MaxTriggers = 8, MaxPlayers = 3, MaxStates = 8 };
+enum { HeaderSize = 32, MaxOutputs = 32, MaxTriggers = 8, MaxPlayers = 3, MaxStates = 8, MaxZones = 32, MaxZoneActions = 64 };
 typedef uint8_t (*ReadByte)(uint16_t);
 
 struct SceneImage {
@@ -11,6 +11,17 @@ struct SceneImage {
   uint8_t b(uint16_t offset) const { return read(offset); }
   uint16_t u16(uint16_t offset) const { return static_cast<uint16_t>(b(offset)) | static_cast<uint16_t>(b(offset + 1)) << 8; }
   uint8_t ambientMixVolume() const { return (b(16) >> 2) & 31; }
+  bool hasZones() const { return b(16) & 128; }
+  uint16_t zoneFooter() const { return u16(4) - 8; }
+  uint8_t zoneCount() const { return hasZones() ? b(zoneFooter() + 3) : 0; }
+  uint16_t actionCount() const { return hasZones() ? u16(zoneFooter() + 4) : 0; }
+  uint16_t transitionEnd() const { return hasZones() ? u16(zoneFooter() + 6) : u16(4); }
+  uint16_t zone(uint8_t index) const { return transitionEnd() + index * 10; }
+  uint16_t zoneAction(uint8_t index) const { return transitionEnd() + zoneCount() * 10 + index * 6; }
+  bool zonedTrigger(uint8_t index) const {
+    for (uint8_t i = 0; i < zoneCount(); ++i) if (b(zone(i)) == index) return true;
+    return false;
+  }
   uint16_t output(uint8_t index) const { return u16(20) + index * 2; }
   uint16_t trigger(uint8_t index) const { return u16(22) + index * 8; }
   uint16_t player(uint8_t index) const { return u16(24) + index * 4; }
@@ -36,8 +47,14 @@ struct SceneImage {
     const uint16_t length = u16(4);
     if (length < HeaderSize || length > capacity || b(8) != board) return false;
     if (b(9) > MaxOutputs || b(10) > MaxTriggers || b(11) > MaxPlayers || !b(12) || b(12) > MaxStates || b(13) >= b(12)) return false;
-    if (u16(14) > 255 || (b(16) & 128) || ambientMixVolume() > 30 || b(18) > 30 || (!(b(16) & 2) && b(19))) return false;
+    if (u16(14) > 255 || ambientMixVolume() > 30 || b(18) > 30 || (!(b(16) & 2) && b(19))) return false;
     if (ambientMixVolume() && (!(b(16) & 1) || !u16(14))) return false;
+    if (hasZones()) {
+      if (length < HeaderSize + 8) return false;
+      const uint16_t footer = zoneFooter();
+      if (b(footer) != 'Z' || b(footer + 1) != 'N' || b(footer + 2) != 1 || !zoneCount() || zoneCount() > MaxZones || actionCount() > MaxZoneActions) return false;
+      if (transitionEnd() < HeaderSize || transitionEnd() > footer || static_cast<uint32_t>(transitionEnd()) + zoneCount() * 10U + actionCount() * 6U != footer) return false;
+    }
     uint16_t offset = HeaderSize;
     if (u16(20) != offset) return false;
     offset += b(9) * 2;
@@ -47,7 +64,7 @@ struct SceneImage {
     offset += b(11) * 4;
     if (u16(26) != offset) return false;
     offset += b(12) * 16;
-    if (u16(28) != offset || offset > length || u16(30) < offset || u16(30) > length || (u16(30) - offset) % 6 || (length - u16(30)) % 2) return false;
+    if (u16(28) != offset || offset > transitionEnd() || u16(30) < offset || u16(30) > transitionEnd() || (u16(30) - offset) % 6 || (transitionEnd() - u16(30)) % 2) return false;
     uint8_t used[9] = {0};
     for (uint8_t i = 0; i < b(9); ++i) {
       const uint16_t p = output(i);
@@ -66,7 +83,7 @@ struct SceneImage {
       if (board == 4 && (b(p + 1) != 18 - 2 * i || b(p + 2) != 19 - 2 * i)) return false;
     }
     const uint16_t totalEvents = (u16(30) - u16(28)) / 6;
-    const uint16_t totalTransitions = (length - u16(30)) / 2;
+    const uint16_t totalTransitions = (transitionEnd() - u16(30)) / 2;
     uint16_t eventsSeen = 0, transitionsSeen = 0;
     bool hasForeground = false, multipleForeground = false;
     uint8_t firstForeground = 0;
@@ -99,6 +116,28 @@ struct SceneImage {
       eventsSeen += count; transitionsSeen += b(p + 10);
     }
     if (eventsSeen != totalEvents || transitionsSeen != totalTransitions) return false;
+    uint16_t actionsSeen = 0;
+    for (uint8_t i = 0; i < zoneCount(); ++i) {
+      const uint16_t z = zone(i);
+      if (b(z) >= b(10) || b(trigger(b(z))) != 2 || (i && b(z) < b(zone(i - 1))) || u16(z + 1) < 2 || u16(z + 3) > 400 || u16(z + 1) > u16(z + 3) || !b(z + 5)) return false;
+      for (uint8_t j = 0; j < i; ++j) {
+        const uint16_t earlier = zone(j);
+        if (b(earlier) == b(z) && u16(z + 1) <= u16(earlier + 3) && u16(earlier + 1) <= u16(z + 3)) return false;
+      }
+      for (uint8_t edge = 0; edge < 2; ++edge) {
+        if (b(z + 6 + edge * 2) != actionsSeen || b(z + 7 + edge * 2) > actionCount() - actionsSeen) return false;
+        actionsSeen += b(z + 7 + edge * 2);
+      }
+    }
+    if (actionsSeen != actionCount()) return false;
+    for (uint8_t i = 0; i < actionCount(); ++i) {
+      const uint16_t a = zoneAction(i);
+      if (b(a) == 0) {
+        if (b(a + 1) >= b(12) || u16(a + 2) || u16(a + 4)) return false;
+      } else if (b(a) == 1) {
+        if (b(a + 1) > 1 || u16(a + 2) > 30 || u16(a + 4) > 255) return false;
+      } else return false;
+    }
     uint8_t requiredPlayers = (hasForeground || u16(14)) ? 1 : 0;
     const bool crossfade = !(b(16) & 2) && b(17);
     if (hasForeground && u16(14) && (b(16) & 1)) requiredPlayers = crossfade && multipleForeground ? 3 : 2;

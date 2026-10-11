@@ -4,6 +4,7 @@
 #include <string.h>
 #include "scene_image.hpp"
 #include "audio_engine.hpp"
+#include "zone_engine.hpp"
 
 namespace {
 bool virtualMagic = false;
@@ -15,6 +16,9 @@ cpc::SceneImage image{readScene};
 cpc::SceneRuntime engine;
 cpc::AudioEngine audio;
 cpc::DebouncedInput inputs[cpc::MaxTriggers];
+cpc::ZoneInput zones[cpc::MaxTriggers];
+uint8_t changedSensor = 255, exitedZone = 255, enteredZone = 255;
+uint8_t zoneSensorMask = 0;
 bool sensorActive[cpc::MaxTriggers];
 bool validScene = false, uploading = false, beginPending = false;
 uint16_t expectedLength = 0, receivedLength = 0, expectedCrc = 0;
@@ -45,18 +49,20 @@ void ack(const __FlashStringHelper* command) {
 }
 void status(bool hello) {
   Serial.print(F("{\"type\":\"")); Serial.print(hello ? F("hello") : F("status"));
-  Serial.print(F("\",\"protocol\":1,\"firmware\":\"0.3.0\",\"board\":\"")); Serial.print(boardName());
+  Serial.print(F("\",\"protocol\":1,\"firmware\":\"0.4.0\",\"board\":\"")); Serial.print(boardName());
   Serial.print(F("\",\"capacity\":")); Serial.print(EEPROM.length());
   Serial.print(F(",\"valid\":")); Serial.print(validScene ? F("true") : F("false"));
   Serial.print(F(",\"running\":")); Serial.print(engine.running ? F("true") : F("false"));
   Serial.print(F(",\"state\":")); if (validScene) Serial.print(engine.currentState); else Serial.print(F("null"));
   Serial.print(F(",\"elapsed\":")); Serial.print(engine.running ? millis() - engine.enteredAt : 0);
   Serial.print(F(",\"outputs\":")); Serial.print(outputMask);
-  Serial.println(F(",\"audioFeedback\":false,\"audioFadeThrough\":true,\"audioAmbientMix\":true}"));
+  Serial.println(F(",\"audioFeedback\":false,\"audioFadeThrough\":true,\"audioAmbientMix\":true,\"distanceZones\":true}"));
 }
-void stateChanged() {
+void stateChanged(uint32_t now) {
+  // Use the state/action timestamp, even if serial logging crosses a millis
+  // boundary. The same loop's audio.update must never precede this fade start.
+  audio.enter(engine.currentState, now);
   Serial.print(F("{\"type\":\"state\",\"state\":")); Serial.print(engine.currentState); Serial.println(F(",\"elapsed\":0}"));
-  audio.enter(engine.currentState, millis());
 }
 void writeOutputs(uint32_t mask, bool force = false) {
   if (!validScene) return;
@@ -72,11 +78,20 @@ void writeOutputs(uint32_t mask, bool force = false) {
 void stop() {
   engine.stop(); writeOutputs(0, true); audio.stop(millis());
   if (validScene && sonarPhase == 1) digitalWrite(image.b(image.trigger(sonarIndex) + 1), LOW);
-  sonarPhase = 0;
+  sonarPhase = 0; changedSensor = 255;
+}
+void resetZones() {
+  changedSensor = 255;
+  for (uint8_t i = 0; i < cpc::MaxTriggers; ++i) zones[i].reset();
+  if (validScene && sonarPhase == 1) digitalWrite(image.b(image.trigger(sonarIndex) + 1), LOW);
+  sonarPhase = 0; sonarIndex = 0; sonarNext = micros();
 }
 void setupScene() {
   const uint32_t now = millis();
-  engine.begin(&image); outputMask = 0; sonarPhase = 0; sonarIndex = 0; sonarNext = micros();
+  engine.begin(&image); outputMask = 0; resetZones();
+  // Cache ownership so the echo timing loop never scans the EEPROM zone table.
+  zoneSensorMask = 0;
+  for (uint8_t i = 0; i < image.zoneCount(); ++i) zoneSensorMask |= 1 << image.b(image.zone(i));
   for (uint8_t i = 0; i < image.b(9); ++i) {
     const uint16_t p = image.output(i);
     digitalWrite(image.b(p), image.b(p + 1) & 1 ? HIGH : LOW);
@@ -102,9 +117,14 @@ void setupScene() {
 
 void sonarMeasurement(bool hasEcho, uint32_t pulseUs) {
   const uint16_t p = image.trigger(sonarIndex);
-  // Approximately 58us round trip per centimetre. Invalid/no echo releases.
+  // Approximately 58us round trip per centimetre. Legacy thresholds release
+  // on invalid echo; zoned sensors retain their baseline and cancel dwell.
   const uint16_t distance = pulseUs / 58;
-  if (!hasEcho || distance < 2 || distance > 400) sensorActive[sonarIndex] = false;
+  if (zoneSensorMask & (1 << sonarIndex)) {
+    if (zones[sonarIndex].sample(image, sonarIndex, hasEcho, distance, millis(), exitedZone)) {
+      changedSensor = sonarIndex; enteredZone = zones[sonarIndex].current;
+    }
+  } else if (!hasEcho || distance < 2 || distance > 400) sensorActive[sonarIndex] = false;
   else if (distance <= image.u16(p + 4)) sensorActive[sonarIndex] = true;
   else if (distance >= image.u16(p + 4) + image.b(p + 6)) sensorActive[sonarIndex] = false;
   sonarPhase = 0; sonarNext = micros() + 60000UL;
@@ -139,11 +159,22 @@ uint8_t readTriggerEdges(uint32_t now) {
   uint8_t edges = 0;
   for (uint8_t i = 0; i < image.b(10); ++i) {
     const uint16_t p = image.trigger(i);
+    if (zoneSensorMask & (1 << i)) continue;
     if (image.b(p) != 2)
       sensorActive[i] = static_cast<bool>(digitalRead(image.b(p + 1))) ^ static_cast<bool>(image.b(p + 3) & 1);
     if (inputs[i].update(sensorActive[i], now, image.b(p + 7) * 50U)) edges |= 1 << i;
   }
   return edges;
+}
+void zoneActions(uint8_t zone, bool entering, uint32_t now) {
+  if (zone == cpc::ZoneInput::None || !engine.running) return;
+  const uint16_t z = image.zone(zone);
+  const uint8_t start = image.b(z + (entering ? 6 : 8)), count = image.b(z + (entering ? 7 : 9));
+  for (uint8_t i = 0; i < count && engine.running; ++i) {
+    const uint16_t a = image.zoneAction(start + i);
+    if (image.b(a) == 0) { engine.enter(image.b(a + 1), now); stateChanged(now); }
+    else audio.volume(image.b(a + 1), image.b(a + 2), image.u16(a + 4) * 50U, now);
+  }
 }
 bool number(const char* input, uint32_t maximum, uint32_t& result) {
   if (!input || !*input) return false;
@@ -174,13 +205,16 @@ void command() {
   if (!strcmp(args[0], "STOP") && count == 1) { stop(); ack(F("STOP")); return; }
   if ((!strcmp(args[0], "RUN") || !strcmp(args[0], "RESET")) && count == 1) {
     if (!validScene || uploading) { error(F("No valid scene")); return; }
-    engine.run(millis()); writeOutputs(engine.activeOutputs(millis()), true); stateChanged();
+    const uint32_t now = millis();
+    resetZones(); engine.run(now); writeOutputs(engine.activeOutputs(now), true); stateChanged(now);
     ack(!strcmp(args[0], "RUN") ? F("RUN") : F("RESET")); return;
   }
   uint32_t value = 0, second = 0;
   if (!strcmp(args[0], "TRIGGER") && count == 2) {
     if (!validScene || !engine.running || !number(args[1], 7, value) || value >= image.b(10)) { error(F("Trigger unavailable")); return; }
-    if (engine.trigger(1 << value, millis())) { writeOutputs(engine.activeOutputs(millis()), true); stateChanged(); }
+    if (zoneSensorMask & (1 << value)) { error(F("Distance zones require a sensor reading")); return; }
+    const uint32_t now = millis();
+    if (engine.trigger(1 << value, now)) { writeOutputs(engine.activeOutputs(now), true); stateChanged(now); }
     ack(F("TRIGGER")); return;
   }
   if (!strcmp(args[0], "BEGIN") && count == 3) {
@@ -246,7 +280,11 @@ void loop() {
   const uint32_t now = millis();
   if (validScene) {
     updateSonar();
-    if (engine.trigger(readTriggerEdges(now), now)) stateChanged();
+    if (engine.trigger(readTriggerEdges(now), now)) stateChanged(now);
+    if (changedSensor != 255) {
+      changedSensor = 255;
+      zoneActions(exitedZone, false, now); zoneActions(enteredZone, true, now);
+    }
     writeOutputs(engine.activeOutputs(now));
   }
   audio.update(now, sonarPhase != 0);

@@ -17,10 +17,11 @@ import {
   requiredPlayerCount,
 } from "../shared/boards";
 import { createTrigger, OUTPUT_COLORS } from "../shared/defaults";
-import { LIMITS } from "../shared/model";
+import { isZonedTrigger, LIMITS } from "../shared/model";
 import type { SceneProject, ValidationIssue } from "../shared/model";
 import { resolveAudioTransition } from "../shared";
 import { AudioTrimEditor } from "./AudioTrimEditor";
+import { DistanceZonesEditor } from "./DistanceZonesEditor";
 
 export interface EditorProps {
   project: SceneProject;
@@ -224,7 +225,10 @@ export function Hardware({
           </div>
           <div className="trigger-grid">
             {project.triggers.map((trigger, index) => (
-              <div className="trigger-card" key={trigger.id}>
+              <div
+                className={`trigger-card ${isZonedTrigger(trigger) ? "zoned-trigger" : ""}`}
+                key={trigger.id}
+              >
                 <div className="row">
                   <input
                     aria-label={`Trigger ${index + 1} name`}
@@ -292,40 +296,96 @@ export function Hardware({
                   </label>
                 </div>
                 {trigger.kind === "ultrasonic" ? (
-                  <div className="field-grid">
+                  <>
                     <label>
-                      Enter distance (cm)
-                      <input
-                        type="number"
-                        min="2"
-                        max="400"
-                        value={trigger.thresholdCm}
-                        onChange={(e) =>
+                      Distance behavior
+                      <select
+                        aria-label={`Trigger ${index + 1} distance behavior`}
+                        value={trigger.distanceMode ?? "threshold"}
+                        onChange={(event) =>
                           change((next) => {
-                            next.triggers[index].thresholdCm = Number(
-                              e.target.value,
-                            );
+                            const sensor = next.triggers[index];
+                            sensor.distanceMode = event.target.value as
+                              "threshold" | "zones";
+                            if (
+                              sensor.distanceMode === "zones" &&
+                              !sensor.zones?.length
+                            ) {
+                              const target =
+                                next.states
+                                  .flatMap((state) => state.transitions)
+                                  .find(
+                                    (transition) =>
+                                      transition.triggerId === sensor.id,
+                                  )?.targetStateId ?? next.initialStateId;
+                              sensor.zones = [
+                                {
+                                  id: crypto.randomUUID(),
+                                  name: "Near",
+                                  minCm: 2,
+                                  maxCm: 100,
+                                  hysteresisCm: 10,
+                                  onEnter: [
+                                    {
+                                      id: crypto.randomUUID(),
+                                      kind: "state",
+                                      stateId: target,
+                                    },
+                                  ],
+                                  onExit: [],
+                                },
+                              ];
+                            }
                           })
                         }
-                      />
+                      >
+                        <option value="threshold">Single threshold</option>
+                        <option value="zones">Distance zones</option>
+                      </select>
                     </label>
-                    <label>
-                      Release margin (cm)
-                      <input
-                        type="number"
-                        min="1"
-                        max="100"
-                        value={trigger.hysteresisCm}
-                        onChange={(e) =>
-                          change((next) => {
-                            next.triggers[index].hysteresisCm = Number(
-                              e.target.value,
-                            );
-                          })
-                        }
+                    {isZonedTrigger(trigger) ? (
+                      <DistanceZonesEditor
+                        project={project}
+                        change={change}
+                        triggerIndex={index}
                       />
-                    </label>
-                  </div>
+                    ) : (
+                      <div className="field-grid">
+                        <label>
+                          Enter distance (cm)
+                          <input
+                            type="number"
+                            min="2"
+                            max="400"
+                            value={trigger.thresholdCm}
+                            onChange={(e) =>
+                              change((next) => {
+                                next.triggers[index].thresholdCm = Number(
+                                  e.target.value,
+                                );
+                              })
+                            }
+                          />
+                        </label>
+                        <label>
+                          Release margin (cm)
+                          <input
+                            type="number"
+                            min="1"
+                            max="100"
+                            value={trigger.hysteresisCm}
+                            onChange={(e) =>
+                              change((next) => {
+                                next.triggers[index].hysteresisCm = Number(
+                                  e.target.value,
+                                );
+                              })
+                            }
+                          />
+                        </label>
+                      </div>
+                    )}
+                  </>
                 ) : (
                   <div className="row wrap">
                     <label className="check">
@@ -370,7 +430,8 @@ export function Hardware({
           )}
           <p className="hint">
             Triggers fire on a new activation and must release before firing
-            again. Ultrasonic readings use separate enter and release distances.
+            again. Ultrasonic sensors can use a single threshold or multiple
+            distance zones with their own actions.
           </p>
         </section>
         <section className="card full">

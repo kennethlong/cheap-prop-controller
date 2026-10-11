@@ -51,6 +51,100 @@ const compiledMix = compileProject(synchronizeAudioPlayers(ambientMix));
 if (!compiledMix.bytes.length)
   throw new Error(JSON.stringify(compiledMix.issues));
 await writeFile("artifacts/scenes/uno-ambient-mix.bin", compiledMix.bytes);
+const zonesProject = structuredClone(ambientMix);
+zonesProject.name = "Ultrasonic approach zones";
+zonesProject.triggers[0] = {
+  ...zonesProject.triggers[0],
+  name: "Visitor distance",
+  kind: "ultrasonic",
+  activeLow: false,
+  pullup: false,
+  distanceMode: "zones",
+  debounceMs: 150,
+  zones: [
+    {
+      id: "far",
+      name: "Far",
+      minCm: 201,
+      maxCm: 400,
+      hysteresisCm: 10,
+      onEnter: [{ id: "far-idle", kind: "state", stateId: "idle" }],
+      onExit: [],
+    },
+    {
+      id: "approaching",
+      name: "Approaching",
+      minCm: 101,
+      maxCm: 200,
+      hysteresisCm: 10,
+      onEnter: [
+        { id: "approach-state", kind: "state", stateId: "approach" },
+        {
+          id: "approach-volume",
+          kind: "volume",
+          target: "foreground",
+          volume: 12,
+          fadeMs: 300,
+        },
+      ],
+      onExit: [],
+    },
+    {
+      id: "close",
+      name: "Close",
+      minCm: 41,
+      maxCm: 100,
+      hysteresisCm: 5,
+      onEnter: [
+        {
+          id: "close-volume",
+          kind: "volume",
+          target: "foreground",
+          volume: 24,
+          fadeMs: 250,
+        },
+      ],
+      onExit: [
+        {
+          id: "leave-close-volume",
+          kind: "volume",
+          target: "foreground",
+          volume: 12,
+          fadeMs: 250,
+        },
+      ],
+    },
+    {
+      id: "very-close",
+      name: "Very close",
+      minCm: 2,
+      maxCm: 40,
+      hysteresisCm: 5,
+      onEnter: [
+        { id: "scare-state", kind: "state", stateId: "scare" },
+        {
+          id: "scare-volume",
+          kind: "volume",
+          target: "foreground",
+          volume: 30,
+          fadeMs: 150,
+        },
+      ],
+      onExit: [],
+    },
+  ],
+};
+for (const state of zonesProject.states)
+  state.transitions = state.transitions.filter(
+    (transition) => transition.triggerId !== zonesProject.triggers[0].id,
+  );
+const allocatedZones = synchronizeAudioPlayers(zonesProject);
+const compiledZones = compileProject(allocatedZones);
+if (!compiledZones.bytes.length)
+  throw new Error(JSON.stringify(compiledZones.issues));
+await writeFile("artifacts/scenes/uno-zones.bin", compiledZones.bytes);
+if (process.argv.includes("--golden"))
+  await writeFile("tests/core/zones-scene.bin", compiledZones.bytes);
 if (process.argv.includes("--golden"))
   await writeFile("tests/core/ambient-mix-scene.bin", compiledMix.bytes);
 if (process.argv.includes("--golden"))
@@ -71,6 +165,10 @@ if (!denseImage.bytes.length)
 await writeFile("artifacts/scenes/uno-dense.bin", denseImage.bytes);
 if (process.argv.includes("--examples")) {
   await mkdir("examples", { recursive: true });
+  await writeFile(
+    "examples/ultrasonic-zones-uno.cpc.json",
+    JSON.stringify(allocatedZones, null, 2) + "\n",
+  );
   fadeProject.name = "Single-player fade transitions";
   await writeFile(
     "examples/single-player-fades-uno.cpc.json",

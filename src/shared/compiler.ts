@@ -4,6 +4,7 @@ import {
   resolveAudioTransition,
 } from "./audio-settings";
 import type { BoardId, SceneProject, ValidationIssue } from "./model";
+import { isZonedTrigger } from "./model";
 import {
   estimateSceneBytes,
   validateProject,
@@ -18,6 +19,9 @@ export const BINARY = {
   state: 16,
   event: 6,
   transition: 2,
+  zone: 10,
+  zoneAction: 6,
+  zoneFooter: 8,
 } as const;
 export const BOARD_CODES: Record<BoardId, number> = {
   uno: 1,
@@ -74,6 +78,11 @@ export function compileProject(project: SceneProject): CompiledScene {
     0,
   );
   const transitionOffset = eventOffset + eventCount * BINARY.event;
+  const zones = project.triggers.flatMap((trigger, triggerIndex) =>
+    isZonedTrigger(trigger)
+      ? (trigger.zones ?? []).map((zone) => ({ triggerIndex, zone }))
+      : [],
+  );
   bytes.set([0x43, 0x50, 0x43, 0x31]);
   u16(4, usedBytes);
   bytes[8] = BOARD_CODES[project.board];
@@ -90,7 +99,8 @@ export function compileProject(project: SceneProject): CompiledScene {
   bytes[16] =
     (project.audio.keepAmbient ? 1 : 0) |
     (sequential ? 2 : 0) |
-    (resolveAmbientMixVolume(project.audio) << 2);
+    (resolveAmbientMixVolume(project.audio) << 2) |
+    (zones.length ? 0x80 : 0);
   bytes[17] = (sequential ? transition.fadeInMs : transition.crossfadeMs) / 50;
   bytes[18] = project.audio.ambientVolume;
   bytes[19] = sequential ? transition.fadeOutMs / 50 : 0;
@@ -162,6 +172,41 @@ export function compileProject(project: SceneProject): CompiledScene {
       );
     });
   });
+  if (zones.length) {
+    const zoneOffset = transitionOffset + transitionIndex * BINARY.transition;
+    const actionOffset = zoneOffset + zones.length * BINARY.zone;
+    let actionIndex = 0;
+    zones.forEach(({ triggerIndex, zone }, zoneIndex) => {
+      const offset = zoneOffset + zoneIndex * BINARY.zone;
+      bytes[offset] = triggerIndex;
+      u16(offset + 1, zone.minCm);
+      u16(offset + 3, zone.maxCm);
+      bytes[offset + 5] = zone.hysteresisCm;
+      for (const [edgeIndex, edge] of (
+        ["onEnter", "onExit"] as const
+      ).entries()) {
+        bytes[offset + 6 + edgeIndex * 2] = actionIndex;
+        bytes[offset + 7 + edgeIndex * 2] = zone[edge].length;
+        for (const action of zone[edge]) {
+          const record = actionOffset + actionIndex++ * BINARY.zoneAction;
+          bytes[record] = action.kind === "state" ? 0 : 1;
+          if (action.kind === "state") {
+            bytes[record + 1] = project.states.findIndex(
+              (state) => state.id === action.stateId,
+            );
+          } else {
+            bytes[record + 1] = action.target === "ambient" ? 0 : 1;
+            u16(record + 2, action.volume);
+            u16(record + 4, action.fadeMs / 50);
+          }
+        }
+      }
+    });
+    const footer = usedBytes - BINARY.zoneFooter;
+    bytes.set([0x5a, 0x4e, 1, zones.length], footer);
+    u16(footer + 4, actionIndex);
+    u16(footer + 6, zoneOffset);
+  }
   u16(6, crc16(bytes, true));
   return { bytes, usedBytes, capacityBytes, issues };
 }

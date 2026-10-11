@@ -1,4 +1,10 @@
-import type { SceneProject, SceneState } from "./model";
+import {
+  isZonedTrigger,
+  type SceneProject,
+  type SceneState,
+  type TriggerConfig,
+  type ZoneAction,
+} from "./model";
 import { parseProject, validateProject } from "./validation";
 import {
   resolveAmbientMixVolume,
@@ -23,6 +29,14 @@ export interface SimulatorSnapshot {
   foregroundTrack: number | null;
   ambientTrack: number | null;
   audio: AudioVoice[];
+  distances: Record<
+    string,
+    {
+      distanceCm: number | null;
+      zoneId: string | null;
+      zoneName: string | null;
+    }
+  >;
   running: boolean;
 }
 interface Voice extends AudioVoice {
@@ -33,16 +47,28 @@ interface Voice extends AudioVoice {
   targetVolume: number;
   stopWhenSilent: boolean;
 }
-type DesiredVoice = Pick<AudioVoice, "role" | "track" | "volume" | "loop">;
+type DesiredVoice = Pick<AudioVoice, "role" | "track" | "volume" | "loop"> & {
+  /** A zone action can replace the incoming voice's normal transition envelope. */
+  fadeMs?: number;
+};
 interface PendingAudio {
   desired: DesiredVoice[];
+  /** Foreground/nonpersistent retirement; retained ambient readiness is separate. */
   readyAt: number;
+  preserveAmbientFade?: boolean;
 }
 interface InputState {
   raw: boolean;
   stable: boolean;
   changedAt: number;
   armed: boolean;
+}
+interface DistanceState {
+  distanceCm: number | null;
+  zoneId: string | null;
+  baselined: boolean;
+  candidateId: string | null;
+  candidateSince: number | null;
 }
 
 /** Deterministic logical preview. Audio decoder startup/latency remain hardware measurements. */
@@ -56,6 +82,7 @@ export class SceneSimulator {
   private voices: Voice[] = [];
   private pendingAudio: PendingAudio | null = null;
   private readonly inputs = new Map<string, InputState>();
+  private readonly distances = new Map<string, DistanceState>();
 
   constructor(project: SceneProject) {
     this.project = parseProject(project);
@@ -78,6 +105,17 @@ export class SceneSimulator {
         armed: true,
       }),
     );
+    this.project.triggers
+      .filter((trigger) => trigger.kind === "ultrasonic")
+      .forEach((trigger) => {
+        this.distances.set(trigger.id, {
+          distanceCm: null,
+          zoneId: null,
+          baselined: false,
+          candidateId: null,
+          candidateSince: null,
+        });
+      });
     this.updateAudio(true);
   }
 
@@ -94,6 +132,7 @@ export class SceneSimulator {
       else this.elapsed = Math.min(this.elapsed, this.current.durationMs);
       const rising = new Set<string>();
       this.project.triggers.forEach((trigger) => {
+        if (isZonedTrigger(trigger)) return;
         const input = this.inputs.get(trigger.id)!;
         if (
           input.raw !== input.stable &&
@@ -108,6 +147,9 @@ export class SceneSimulator {
         }
       });
       this.applyTriggers(rising);
+      this.project.triggers.forEach((trigger) => {
+        if (isZonedTrigger(trigger)) this.sampleZones(trigger);
+      });
       this.refreshVoices();
     }
     return this.snapshot();
@@ -115,7 +157,8 @@ export class SceneSimulator {
 
   /** UI trigger button injects a clean edge, like the device's virtual-trigger command. */
   trigger(triggerId: string): boolean {
-    if (!this.inputs.has(triggerId)) return false;
+    const trigger = this.project.triggers.find((item) => item.id === triggerId);
+    if (!trigger || isZonedTrigger(trigger)) return false;
     return this.applyTriggers(new Set([triggerId]));
   }
 
@@ -123,6 +166,12 @@ export class SceneSimulator {
   setTrigger(triggerId: string, active: boolean): void {
     const input = this.inputs.get(triggerId);
     if (!input) throw new Error(`Unknown trigger: ${triggerId}`);
+    if (
+      isZonedTrigger(
+        this.project.triggers.find((item) => item.id === triggerId)!,
+      )
+    )
+      throw new Error("Use a distance reading to preview an ultrasonic zone.");
     if (input.raw !== active) {
       input.raw = active;
       input.changedAt = this.total;
@@ -138,9 +187,20 @@ export class SceneSimulator {
       throw new Error("Distance requires an ultrasonic trigger.");
     if (
       centimeters !== null &&
-      (!Number.isFinite(centimeters) || centimeters < 0)
+      (!Number.isFinite(centimeters) ||
+        (!isZonedTrigger(trigger) && centimeters < 0))
     )
-      throw new Error("Distance must be nonnegative or null for no echo.");
+      throw new Error("Distance must be a valid number or null for no echo.");
+    const distance = this.distances.get(triggerId)!;
+    distance.distanceCm =
+      centimeters === null || centimeters < 2 || centimeters > 400
+        ? null
+        : centimeters;
+    if (isZonedTrigger(trigger)) {
+      // Invalid measurements break dwell immediately, even between preview ticks.
+      if (distance.distanceCm === null) distance.candidateSince = null;
+      return;
+    }
     const input = this.inputs.get(triggerId)!;
     if (
       centimeters === null ||
@@ -157,6 +217,12 @@ export class SceneSimulator {
   reset(): SimulatorSnapshot {
     this.running = true;
     this.remainder = 0;
+    this.distances.forEach((distance) => {
+      distance.baselined = false;
+      distance.zoneId = null;
+      distance.candidateId = null;
+      distance.candidateSince = null;
+    });
     this.enter(this.project.initialStateId);
     return this.snapshot();
   }
@@ -169,6 +235,9 @@ export class SceneSimulator {
     this.running = false;
     this.pendingAudio = null;
     this.voices = [];
+    this.distances.forEach((distance) => {
+      distance.candidateSince = null;
+    });
     return this.snapshot();
   }
 
@@ -217,6 +286,24 @@ export class SceneSimulator {
           loop,
         }),
       ),
+      distances: Object.fromEntries(
+        this.project.triggers
+          .filter((trigger) => trigger.kind === "ultrasonic")
+          .map((trigger) => {
+            const distance = this.distances.get(trigger.id)!;
+            const zone = trigger.zones?.find(
+              (item) => item.id === distance.zoneId,
+            );
+            return [
+              trigger.id,
+              {
+                distanceCm: distance.distanceCm,
+                zoneId: distance.zoneId,
+                zoneName: zone?.name ?? null,
+              },
+            ];
+          }),
+      ),
       running: this.running,
     };
   }
@@ -237,16 +324,115 @@ export class SceneSimulator {
     this.updateAudio(false);
   }
 
+  private sampleZones(trigger: TriggerConfig): void {
+    const distance = this.distances.get(trigger.id)!;
+    if (distance.distanceCm === null) {
+      distance.candidateSince = null;
+      return;
+    }
+    const zones = trigger.zones ?? [];
+    const current = zones.find((zone) => zone.id === distance.zoneId);
+    const centimeters = distance.distanceCm;
+    const next =
+      current &&
+      centimeters >= current.minCm - current.hysteresisCm &&
+      centimeters <= current.maxCm + current.hysteresisCm
+        ? current
+        : zones.find(
+            (zone) => centimeters >= zone.minCm && centimeters <= zone.maxCm,
+          );
+    const nextId = next?.id ?? null;
+    if (!distance.baselined) {
+      distance.baselined = true;
+      distance.zoneId = nextId;
+      distance.candidateSince = null;
+      return;
+    }
+    if (nextId === distance.zoneId) {
+      distance.candidateSince = null;
+      return;
+    }
+    if (distance.candidateSince === null || distance.candidateId !== nextId) {
+      distance.candidateId = nextId;
+      distance.candidateSince = this.total;
+    }
+    if (this.total - distance.candidateSince < trigger.debounceMs) return;
+    distance.zoneId = nextId;
+    distance.candidateSince = null;
+    // Record the crossing before dispatch; entering a scene does not rearm sensors.
+    this.applyZoneActions(current?.onExit ?? []);
+    this.applyZoneActions(next?.onEnter ?? []);
+  }
+
+  private applyZoneActions(actions: ZoneAction[]): void {
+    actions.forEach((action) => {
+      if (action.kind === "state") this.enter(action.stateId);
+      else this.setRoleVolume(action.target, action.volume, action.fadeMs);
+    });
+  }
+
+  private setRoleVolume(
+    role: AudioVoice["role"],
+    volume: number,
+    fadeMs: number,
+  ): void {
+    this.refreshVoices();
+    const pending = this.pendingAudio;
+    if (pending) {
+      const desired = pending.desired.find((voice) => voice.role === role);
+      if (!desired) return;
+      desired.volume = volume;
+      desired.fadeMs = fadeMs;
+      // Outgoing foreground and nonpersistent ambient keep retiring. Their
+      // replacements receive the override when handoff starts playback.
+      if (role === "foreground" || !this.project.audio.keepAmbient) return;
+      pending.preserveAmbientFade = true;
+      // Releasing an ambient-only wait starts incoming playback now, never at
+      // an earlier foreground deadline. A future foreground deadline still holds.
+      pending.readyAt = Math.max(pending.readyAt, this.total);
+    }
+    const voice = this.voices.find(
+      (candidate) =>
+        candidate.role === role &&
+        (role === "ambient" && pending ? true : !candidate.stopWhenSilent),
+    );
+    if (!voice) return;
+    voice.fadeFrom = voice.volume;
+    voice.fadeStartedAt = this.total;
+    voice.fadeDurationMs = fadeMs;
+    voice.targetVolume = volume;
+    // A muted logical role stays resident so later volume changes keep its playhead.
+    voice.stopWhenSilent = false;
+    this.refreshVoices();
+  }
+
   private refreshVoices(): void {
-    if (this.pendingAudio && this.total >= this.pendingAudio.readyAt) {
-      const pending = this.pendingAudio;
+    const pending = this.pendingAudio;
+    // Clearing a zone override can begin a new silent-ambient fade while the
+    // original foreground fade is already pending. Both must reach silence;
+    // a fresh persistent override makes ambient independent again.
+    const retiringAmbient =
+      pending &&
+      this.project.audio.keepAmbient &&
+      resolveAmbientMixVolume(this.project.audio) === 0 &&
+      !pending.preserveAmbientFade
+        ? this.voices.find((voice) => voice.role === "ambient")
+        : undefined;
+    const readyAt = Math.max(
+      pending?.readyAt ?? 0,
+      retiringAmbient?.targetVolume === 0 && retiringAmbient.fadeFrom > 0
+        ? retiringAmbient.fadeStartedAt + retiringAmbient.fadeDurationMs
+        : 0,
+    );
+    if (pending && this.total >= readyAt) {
       this.pendingAudio = null;
       this.installVoices(
         pending.desired,
-        pending.readyAt,
+        readyAt,
         resolveAudioTransition(this.project.audio).fadeInMs,
         this.project.audio.keepAmbient,
-        resolveAmbientMixVolume(this.project.audio) > 0,
+        resolveAmbientMixVolume(this.project.audio) > 0 ||
+          !!pending.preserveAmbientFade,
       );
     }
     this.voices.forEach((voice) => {
@@ -301,15 +487,16 @@ export class SceneSimulator {
           (_, index) => index,
         ).find((index) => !occupied.has(index))!;
       occupied.add(playerIndex);
+      const duration = item.fadeMs ?? fadeDurationMs;
       return {
         ...item,
         playerIndex,
-        volume: fadeDurationMs === 0 ? item.volume : 0,
+        volume: duration === 0 ? item.volume : 0,
         positionMs: 0,
         startedAt: old?.startedAt ?? startedAt,
         fadeStartedAt: startedAt,
-        fadeDurationMs,
-        fadeFrom: fadeDurationMs === 0 ? item.volume : 0,
+        fadeDurationMs: duration,
+        fadeFrom: duration === 0 ? item.volume : 0,
         targetVolume: item.volume,
         stopWhenSilent: false,
       };
@@ -365,6 +552,17 @@ export class SceneSimulator {
       if (this.pendingAudio) {
         // Trigger priority is immediate; only the newest audio target survives.
         this.pendingAudio.desired = desired;
+        this.pendingAudio.preserveAmbientFade = false;
+        if (audio.keepAmbient && !mixedAmbient) {
+          const ambient = this.voices.find((voice) => voice.role === "ambient");
+          if (ambient && ambient.targetVolume !== 0) {
+            ambient.fadeFrom = ambient.volume;
+            ambient.fadeStartedAt = this.total;
+            ambient.fadeDurationMs = transition.fadeOutMs;
+            ambient.targetVolume = 0;
+            ambient.stopWhenSilent = false;
+          }
+        }
       } else {
         const duration = this.voices.some(
           (voice) =>
@@ -372,7 +570,17 @@ export class SceneSimulator {
         )
           ? transition.fadeOutMs
           : 0;
-        this.pendingAudio = { desired, readyAt: this.total + duration };
+        const retirementDuration = this.voices.some(
+          (voice) =>
+            voice.volume > 0 &&
+            (voice.role === "foreground" || !audio.keepAmbient),
+        )
+          ? transition.fadeOutMs
+          : 0;
+        this.pendingAudio = {
+          desired,
+          readyAt: this.total + retirementDuration,
+        };
         this.voices.forEach((voice) => {
           if (mixedAmbient && voice.role === "ambient") return;
           voice.fadeFrom = voice.volume;

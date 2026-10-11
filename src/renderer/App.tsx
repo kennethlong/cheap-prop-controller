@@ -27,6 +27,7 @@ import {
   createSimulator,
   createState,
   getMediaClip,
+  isZonedTrigger,
   LIMITS,
   parseProject,
   synchronizeAudioPlayers,
@@ -82,6 +83,8 @@ export function App() {
   const projectRef = useRef(project);
   projectRef.current = project;
   const simulator = useRef<SceneSimulator | null>(null);
+  const previewStateId = useRef<string | null>(null);
+  const previewDistanceEpoch = useRef(0);
   const previewOperation = useRef(0);
   const audio = useRef(new PreviewAudio());
   useEffect(
@@ -134,6 +137,8 @@ export function App() {
     setStarted(false);
     simulator.current?.stop();
     simulator.current = null;
+    previewStateId.current = null;
+    previewDistanceEpoch.current++;
     setSnapshot(null);
     audio.current.stopAll();
     setPosition(0);
@@ -312,6 +317,11 @@ export function App() {
       setTab("scene");
     });
   const applySnapshot = (next: SimulatorSnapshot) => {
+    if (previewStateId.current !== next.stateId) {
+      setSelectedStateId(next.stateId);
+      setSelectedEventId(null);
+    }
+    previewStateId.current = next.stateId;
     setSnapshot(next);
     setPosition(next.elapsedMs);
     audio.current.sync(next.audio, projectRef.current.audio.tracks);
@@ -341,10 +351,12 @@ export function App() {
   };
   const resetPreview = () => {
     previewOperation.current++;
+    previewDistanceEpoch.current++;
     try {
       audio.current.stopAll();
       simulator.current = createSimulator(projectRef.current);
       const next = simulator.current.snapshot();
+      previewStateId.current = next.stateId;
       setSnapshot(next);
       setPosition(0);
       setSelectedStateId(next.stateId);
@@ -362,12 +374,20 @@ export function App() {
       const next = simulator.current.snapshot();
       if (running) applySnapshot(next);
       else {
+        previewStateId.current = next.stateId;
         setSnapshot(next);
         setPosition(next.elapsedMs);
       }
       setSelectedStateId(next.stateId);
       setSelectedEventId(null);
     }
+  };
+  const distancePreview = (id: string, distanceCm: number | null) => {
+    if (!simulator.current) return;
+    simulator.current.setDistance(id, distanceCm);
+    const next = simulator.current.snapshot();
+    if (running) applySnapshot(next);
+    else setSnapshot(next);
   };
   useEffect(() => {
     if (!running) return;
@@ -965,6 +985,10 @@ export function App() {
                 }
                 previewState={snapshot?.stateName ?? "Idle"}
                 onTrigger={triggerPreview}
+                onDistance={distancePreview}
+                distances={snapshot?.distances ?? {}}
+                distanceResetKey={previewDistanceEpoch.current}
+                previewAudio={snapshot?.audio ?? []}
                 enabledTriggers={
                   activeState?.transitions.map((t) => t.triggerId) ?? []
                 }
@@ -1237,11 +1261,20 @@ export function App() {
                             })
                           }
                         >
-                          {project.triggers.map((trigger) => (
-                            <option key={trigger.id} value={trigger.id}>
-                              {trigger.name}
-                            </option>
-                          ))}
+                          {project.triggers
+                            .filter(
+                              (trigger) =>
+                                !isZonedTrigger(trigger) ||
+                                trigger.id === transition.triggerId,
+                            )
+                            .map((trigger) => (
+                              <option key={trigger.id} value={trigger.id}>
+                                {trigger.name}
+                                {isZonedTrigger(trigger)
+                                  ? " (inactive: distance zones)"
+                                  : ""}
+                              </option>
+                            ))}
                         </select>
                       </label>
                       <button
@@ -1275,6 +1308,17 @@ export function App() {
                         ))}
                       </select>
                     </div>
+                    {project.triggers.some(
+                      (trigger) =>
+                        trigger.id === transition.triggerId &&
+                        isZonedTrigger(trigger),
+                    ) && (
+                      <p className="hint">
+                        Inactive while this sensor uses distance zones. Edit its
+                        actions in Hardware; switching back to a single
+                        threshold restores this transition.
+                      </p>
+                    )}
                   </div>
                 ))}
                 <button
@@ -1282,6 +1326,7 @@ export function App() {
                   disabled={
                     !project.triggers.some(
                       (trigger) =>
+                        !isZonedTrigger(trigger) &&
                         !state.transitions.some(
                           (t) => t.triggerId === trigger.id,
                         ),
@@ -1291,6 +1336,7 @@ export function App() {
                     updateState((next) => {
                       const available = project.triggers.find(
                         (trigger) =>
+                          !isZonedTrigger(trigger) &&
                           !next.transitions.some(
                             (t) => t.triggerId === trigger.id,
                           ),
@@ -1308,7 +1354,8 @@ export function App() {
                 </button>
                 <p className="hint">
                   Unlisted triggers are ignored in this state. Transitions
-                  replace the current timeline.
+                  replace the current timeline. Distance zone actions run in
+                  every state and are configured in Hardware.
                 </p>
               </div>
               <Issues
@@ -1321,7 +1368,7 @@ export function App() {
                   className="ghost danger-text"
                   onClick={() =>
                     setConfirmAction({
-                      message: `Delete “${state.name}”, its events, and any transitions that lead to it?`,
+                      message: `Delete “${state.name}”, its events, and any transitions or distance zone actions that lead to it?`,
                       action: () => {
                         change((next) => {
                           next.states = next.states.filter(
@@ -1332,6 +1379,20 @@ export function App() {
                               (t) => t.targetStateId !== state.id,
                             );
                           });
+                          next.triggers.forEach((trigger) =>
+                            trigger.zones?.forEach((zone) => {
+                              zone.onEnter = zone.onEnter.filter(
+                                (action) =>
+                                  action.kind !== "state" ||
+                                  action.stateId !== state.id,
+                              );
+                              zone.onExit = zone.onExit.filter(
+                                (action) =>
+                                  action.kind !== "state" ||
+                                  action.stateId !== state.id,
+                              );
+                            }),
+                          );
                         });
                         setSelectedStateId(project.initialStateId);
                         setSelectedEventId(null);

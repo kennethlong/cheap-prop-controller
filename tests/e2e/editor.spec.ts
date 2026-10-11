@@ -1,6 +1,282 @@
 import { test, expect } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 
+test("distance zones edit and persist without consuming more pins, and state deletion cleans their actions", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Hardware", exact: true }).click();
+  await page.getByLabel("Trigger 1 type").selectOption("ultrasonic");
+  const outputs = page
+    .locator(".resource-stat")
+    .filter({ hasText: "Outputs available" })
+    .locator("strong");
+  await expect(outputs).toHaveText("14");
+  await page.getByLabel("Trigger 1 distance behavior").selectOption("zones");
+  const near = page.getByRole("region", {
+    name: "Approach zone 1",
+    exact: true,
+  });
+  await near.getByLabel("Zone 1 minimum distance").fill("40");
+  await near.getByLabel("Zone 1 maximum distance").fill("150");
+  await near.getByLabel("Zone 1 release margin").fill("8");
+  await near
+    .getByRole("button", { name: "Add on exit action", exact: true })
+    .click();
+  await near.getByLabel("On exit action 1 state").selectOption("idle");
+  await page
+    .getByRole("button", { name: "Add distance zone", exact: true })
+    .click();
+  const close = page.getByRole("region", {
+    name: "Approach zone 2",
+    exact: true,
+  });
+  await close.getByLabel("Zone 2 name").fill("Close");
+  await expect(close.getByLabel("Zone 2 minimum distance")).toHaveValue("2");
+  await expect(close.getByLabel("Zone 2 maximum distance")).toHaveValue("39");
+  await close
+    .getByRole("button", { name: "Add on enter action", exact: true })
+    .click();
+  await close.getByLabel("On enter action 1 state").selectOption("scare");
+  await close
+    .getByRole("button", { name: "Add on enter action", exact: true })
+    .click();
+  await close.getByLabel("On enter action 2 type").selectOption("volume");
+  await close
+    .getByLabel("On enter action 2 audio target")
+    .selectOption("foreground");
+  await close.getByLabel("On enter action 2 volume").fill("9");
+  await close.getByLabel("On enter action 2 fade").fill("150");
+  await close
+    .getByRole("button", { name: "Move on enter action 2 up", exact: true })
+    .click();
+  await expect(close.getByLabel("On enter action 1 type")).toHaveValue(
+    "volume",
+  );
+  await close
+    .getByRole("button", { name: "Move on enter action 1 down", exact: true })
+    .click();
+  await expect(close.getByLabel("On enter action 2 volume")).toHaveValue("9");
+  await expect(outputs).toHaveText("14");
+  await page
+    .getByLabel("Trigger 1 distance behavior")
+    .selectOption("threshold");
+  await expect(near).toHaveCount(0);
+  await page.getByLabel("Trigger 1 distance behavior").selectOption("zones");
+  await expect(close.getByLabel("On enter action 2 volume")).toHaveValue("9");
+  await page.getByRole("button", { name: "Scene", exact: true }).click();
+  await page
+    .locator(".state-list")
+    .getByRole("button", { name: /Idle/ })
+    .click();
+  await expect(
+    page.getByLabel("Transition 2 trigger").locator("option:checked"),
+  ).toContainText("inactive: distance zones");
+  await expect(
+    page.getByText("Inactive while this sensor uses distance zones.", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Save project", exact: true }).click();
+  const saved = JSON.parse(
+    await readFile((await (await downloadPromise).path())!, "utf8"),
+  );
+  expect(saved.triggers[0].zones[1].onEnter).toEqual([
+    expect.objectContaining({ kind: "state", stateId: "scare" }),
+    expect.objectContaining({
+      kind: "volume",
+      target: "foreground",
+      volume: 9,
+      fadeMs: 150,
+    }),
+  ]);
+  expect(saved.triggers[0]).toMatchObject({
+    pin: expect.any(Number),
+    echoPin: expect.any(Number),
+    distanceMode: "zones",
+  });
+  await page.locator('input[type=file][accept=".json,.cpc"]').setInputFiles({
+    name: "zones.cpc.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(saved)),
+  });
+  await page.getByRole("button", { name: "Hardware", exact: true }).click();
+  await expect(close.getByLabel("On enter action 2 volume")).toHaveValue("9");
+  await expect(near.getByLabel("Zone 1 release margin")).toHaveValue("8");
+  await close.scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: "artifacts/distance-zone-editor.png",
+    fullPage: true,
+  });
+  await page.getByRole("button", { name: "Scene", exact: true }).click();
+  await page
+    .locator(".state-list")
+    .getByRole("button", { name: /Scare/ })
+    .click();
+  await page.getByRole("button", { name: "Delete state", exact: true }).click();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await page.getByRole("button", { name: "Hardware", exact: true }).click();
+  await expect(close.getByLabel("On enter action 1 type")).toHaveValue(
+    "volume",
+  );
+  await expect(close.getByLabel("On enter action 1 volume")).toHaveValue("9");
+  await expect(close.getByLabel("On enter action 2 type")).toHaveCount(0);
+});
+
+test("distance preview follows zones with dwell and deadband, holds on no echo, and changes volume without restarting", async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const sample = JSON.parse(
+    await readFile("examples/three-state-starter.cpc.json", "utf8"),
+  );
+  sample.audio.tracks = [
+    { number: 1, name: "Ambient" },
+    { number: 2, name: "Approach sound" },
+  ];
+  sample.audio.ambientTrack = 1;
+  sample.audio.ambientVolume = 20;
+  sample.audio.keepAmbient = true;
+  sample.audio.ambientMixVolume = 8;
+  sample.audio.transitionMode = "cut";
+  sample.states.find(
+    (state: { id: string }) => state.id === "approach",
+  ).foregroundTrack = 2;
+  sample.triggers[0] = {
+    ...sample.triggers[0],
+    name: "Visitor",
+    kind: "ultrasonic",
+    activeLow: false,
+    pullup: false,
+    distanceMode: "zones",
+    debounceMs: 150,
+    zones: [
+      {
+        id: "close",
+        name: "Close",
+        minCm: 2,
+        maxCm: 39,
+        hysteresisCm: 10,
+        onEnter: [
+          {
+            id: "quiet",
+            kind: "volume",
+            target: "foreground",
+            volume: 9,
+            fadeMs: 150,
+          },
+        ],
+        onExit: [],
+      },
+      {
+        id: "near",
+        name: "Approaching",
+        minCm: 40,
+        maxCm: 149,
+        hysteresisCm: 10,
+        onEnter: [{ id: "approach", kind: "state", stateId: "approach" }],
+        onExit: [],
+      },
+      {
+        id: "far",
+        name: "Far",
+        minCm: 150,
+        maxCm: 400,
+        hysteresisCm: 10,
+        onEnter: [{ id: "idle", kind: "state", stateId: "idle" }],
+        onExit: [],
+      },
+    ],
+  };
+  await page.goto("/");
+  await page.locator('input[type=file][accept=".json,.cpc"]').setInputFiles({
+    name: "distance-preview.cpc.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(sample)),
+  });
+  // Reallocate the imported sample's original one-pin wiring and audio modules.
+  await page.getByRole("button", { name: "Hardware", exact: true }).click();
+  await page.getByLabel("Trigger 1 debounce").fill("200");
+  await page.getByLabel("Trigger 1 debounce").fill("150");
+  await page.getByRole("button", { name: "Scene", exact: true }).click();
+  await page.getByRole("button", { name: "Play preview", exact: true }).click();
+  const distance = page.getByLabel("Visitor preview distance", { exact: true });
+  const activeZone = page.getByTestId(`distance-zone-${sample.triggers[0].id}`);
+  await expect(
+    page
+      .locator(".preview-buttons")
+      .getByRole("button", { name: "Visitor", exact: true }),
+  ).toHaveCount(0);
+  await distance.fill("300");
+  await expect(activeZone).toHaveText("Zone: Far");
+  await expect(page.getByTestId("preview-state")).toHaveText("Idle");
+  await distance.fill("145");
+  // Still in the far zone's 10 cm release margin.
+  await expect(page.getByTestId("preview-state")).toHaveText("Idle");
+  await distance.fill("");
+  await distance.pressSequentially("100");
+  await expect(distance).toHaveValue("100");
+  await expect(activeZone).toHaveText("Zone: Approaching");
+  await expect(page.getByTestId("preview-state")).toHaveText("Approach");
+  await expect(page.getByLabel("State name", { exact: true })).toHaveValue(
+    "Approach",
+  );
+  const foreground = page.locator('[data-testid^="preview-audio-foreground-"]');
+  await expect
+    .poll(async () => Number(await foreground.getAttribute("data-position-ms")))
+    .toBeGreaterThan(1000);
+  const beforeClose = Number(await foreground.getAttribute("data-position-ms"));
+  await distance.fill("20");
+  await expect(activeZone).toHaveText("Zone: Close");
+  await expect(foreground).toHaveAttribute("data-volume", "9");
+  expect(
+    Number(await foreground.getAttribute("data-position-ms")),
+  ).toBeGreaterThan(beforeClose);
+  await expect(page.getByTestId("preview-state")).toHaveText("Approach");
+  await page
+    .getByRole("button", { name: "Visitor no echo", exact: true })
+    .click();
+  await expect(distance).toHaveValue("");
+  await expect(activeZone).toHaveText("Zone: Close");
+  await expect(foreground).toHaveAttribute("data-volume", "9");
+  await distance.fill("45");
+  await expect(activeZone).toHaveText("Zone: Close");
+  // Manually inspecting another timeline must remain possible while preview runs.
+  await page
+    .locator(".state-list")
+    .getByRole("button", { name: /Scare/ })
+    .click();
+  await expect(page.getByLabel("State name", { exact: true })).toHaveValue(
+    "Scare",
+  );
+  await expect
+    .poll(async () => Number(await foreground.getAttribute("data-position-ms")))
+    .toBeGreaterThan(beforeClose + 1000);
+  await expect(page.getByLabel("State name", { exact: true })).toHaveValue(
+    "Scare",
+  );
+  await distance.fill("300");
+  await expect(activeZone).toHaveText("Zone: Far");
+  await expect(page.getByTestId("preview-state")).toHaveText("Idle");
+  await expect(page.getByLabel("State name", { exact: true })).toHaveValue(
+    "Idle",
+  );
+  await page.screenshot({
+    path: "artifacts/distance-zone-preview.png",
+    fullPage: true,
+  });
+  await page
+    .getByRole("button", { name: "Reset preview", exact: true })
+    .click();
+  await distance.fill("100");
+  await expect(activeZone).toHaveText("Zone: Approaching");
+  await expect(page.getByTestId("preview-state")).toHaveText("Idle");
+  await page.getByRole("button", { name: "Stop preview", exact: true }).click();
+  expect(errors).toEqual([]);
+});
+
 test("preview follows the three-state scene and shows active outputs", async ({
   page,
 }) => {

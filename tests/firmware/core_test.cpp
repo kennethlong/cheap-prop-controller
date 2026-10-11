@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "scene_image.hpp"
+#include "zone_engine.hpp"
 
 static uint8_t bytes[4096];
 static uint16_t size;
@@ -66,6 +67,94 @@ static void testAmbientMixValidation() {
   seal(); assert(image.valid(1024, 1)); assert(image.ambientMixVolume() == 8);
   word(74, 2); seal(); assert(!image.valid(1024, 1)); // Persistent foreground still needs two decoders.
 }
+static void zoneFixture() {
+  fixture();
+  bytes[44] = 2; bytes[46] = 6; bytes[47] = 0;
+  word(48, 100); bytes[50] = 10; bytes[51] = 2;
+  bytes[16] |= 128;
+  const uint16_t ranges[3][2] = {{2, 40}, {80, 100}, {150, 300}};
+  for (uint8_t i = 0; i < 3; ++i) {
+    const uint16_t z = 108 + i * 10;
+    bytes[z] = 1; word(z + 1, ranges[i][0]); word(z + 3, ranges[i][1]); bytes[z + 5] = 10;
+  }
+  bytes[114] = 0; bytes[115] = 1; bytes[116] = 1; bytes[117] = 1;
+  bytes[124] = 2; bytes[125] = 1; bytes[126] = 3; bytes[127] = 0;
+  bytes[134] = 3; bytes[135] = 1; bytes[136] = 4; bytes[137] = 0;
+  bytes[138] = 0; bytes[139] = 1;
+  bytes[144] = 1; word(148, 2);
+  bytes[150] = 1; bytes[151] = 1; word(152, 12); word(154, 3);
+  bytes[156] = 0; bytes[157] = 0;
+  size = 170; word(4, size);
+  bytes[162] = 'Z'; bytes[163] = 'N'; bytes[164] = 1; bytes[165] = 3;
+  word(166, 4); word(168, 108); seal();
+  assert(image.valid(1024, 1));
+}
+static void testZoneValidation() {
+  zoneFixture(); assert(image.hasZones() && image.zoneCount() == 3 && image.actionCount() == 4);
+  assert(!image.zonedTrigger(0) && image.zonedTrigger(1));
+  assert(image.transitionEnd() == 108 && image.zone(2) == 128 && image.zoneAction(3) == 156);
+  zoneFixture(); bytes[162] = 'X'; seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); bytes[164] = 2; seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); bytes[165] = 0; seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); bytes[165] = 33; seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); word(166, 65); seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); word(168, 65535); seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); word(168, 109); seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); bytes[108] = 0; seal(); assert(!image.valid(1024, 1)); // Digital input cannot own zones.
+  zoneFixture(); bytes[108] = 2; seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); word(109, 1); seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); word(111, 401); seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); word(109, 41); seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); bytes[113] = 0; seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); word(119, 40); seal(); assert(!image.valid(1024, 1)); // Inclusive endpoints overlap.
+  zoneFixture(); bytes[114] = 1; seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); bytes[115] = 5; seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); bytes[124] = 1; seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); bytes[137] = 1; seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); bytes[138] = 2; seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); bytes[139] = 2; seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); word(140, 1); seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); word(142, 1); seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); bytes[145] = 2; seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); word(146, 31); seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); word(148, 256); seal(); assert(!image.valid(1024, 1));
+  zoneFixture(); word(146, 30); word(148, 255); seal(); assert(image.valid(1024, 1));
+  // Reorder same-sensor ranges: editor order is valid and need not be spatial.
+  zoneFixture(); word(109, 150); word(111, 300); word(129, 2); word(131, 40); seal(); assert(image.valid(1024, 1));
+  // Extension bytes cannot masquerade as legacy transition records.
+  bytes[16] &= ~128; seal(); assert(!image.valid(1024, 1));
+}
+static void testZoneSampling() {
+  zoneFixture(); cpc::ZoneInput input; input.reset(); uint8_t previous = 255;
+  assert(!input.sample(image, 1, false, 0, 0, previous)); assert(!input.initialized);
+  assert(!input.sample(image, 1, true, 100, 10, previous)); assert(input.current == 1); // Silent startup.
+  assert(!input.sample(image, 1, true, 110, 1000, previous)); // Inclusive deadband retains current.
+  assert(!input.sample(image, 1, true, 111, 1010, previous));
+  assert(!input.sample(image, 1, true, 111, 1109, previous));
+  assert(input.sample(image, 1, true, 111, 1110, previous)); assert(previous == 1 && input.current == 255);
+  assert(!input.sample(image, 1, true, 30, 1200, previous));
+  assert(!input.sample(image, 1, false, 0, 1300, previous));
+  assert(!input.sample(image, 1, true, 30, 1400, previous)); // Invalid reset the complete dwell.
+  assert(input.sample(image, 1, true, 30, 1500, previous)); assert(previous == 255 && input.current == 0);
+  assert(!input.sample(image, 1, true, 50, 1600, previous)); // Same-zone boundary is retained.
+  assert(!input.sample(image, 1, true, 200, 1700, previous));
+  assert(input.sample(image, 1, true, 200, 1800, previous)); assert(previous == 0 && input.current == 2); // Skips middle.
+  assert(!input.sample(image, 1, true, 401, 1900, previous)); assert(input.current == 2);
+  assert(!input.sample(image, 1, true, 1, 2000, previous)); assert(input.current == 2);
+  assert(!input.sample(image, 1, true, 90, 2100, previous));
+  assert(!input.sample(image, 1, true, 200, 2150, previous)); // Bounce back cancels candidate.
+  assert(!input.sample(image, 1, true, 90, 2200, previous));
+  assert(input.sample(image, 1, true, 90, 2300, previous)); assert(input.current == 1);
+  input.reset(); assert(!input.sample(image, 1, true, 30, 2400, previous)); assert(input.current == 0);
+  bytes[51] = 0;
+  assert(input.sample(image, 1, true, 200, 2401, previous)); assert(previous == 0 && input.current == 2);
+  input.reset(); bytes[51] = 1;
+  assert(!input.sample(image, 1, true, 90, 0xffffffe0UL, previous));
+  assert(!input.sample(image, 1, true, 30, 0xfffffff0UL, previous));
+  assert(input.sample(image, 1, true, 30, 0x22UL, previous)); assert(input.current == 0);
+  // Same pin pair owns every zone, and readings from another sensor cannot select them.
+  input.reset(); assert(!input.sample(image, 0, true, 90, 0, previous)); assert(input.current == 255);
+}
 static void testTimeline() {
   fixture();
   cpc::SceneRuntime runtime; runtime.begin(&image);
@@ -118,7 +207,7 @@ static void testPackets() {
   assert(crc == 0x29b1);
 }
 int main(int argc, char** argv) {
-  testIntegrity(); testAmbientMixValidation(); testTimeline(); testDebounce(); testPackets();
+  testIntegrity(); testAmbientMixValidation(); testZoneValidation(); testZoneSampling(); testTimeline(); testDebounce(); testPackets();
   if (argc > 1) {
     FILE* file = nullptr;
 #ifdef _MSC_VER
@@ -130,5 +219,5 @@ int main(int argc, char** argv) {
     assert(size >= 32 && image.valid(bytes[8] == 4 ? 4096 : 1024, bytes[8]));
     puts("Desktop-generated binary passes firmware validation.");
   }
-  puts("Firmware host tests passed: integrity, bounds, pins, timelines, priority, STOP, wrap, debounce, packets, CRC.");
+  puts("Firmware host tests passed: integrity, zone layout/actions, fresh-sample dwell, deadband, gaps, baseline, wrap, pins, timelines, debounce, packets, CRC.");
 }

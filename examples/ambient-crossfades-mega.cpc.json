@@ -132,6 +132,7 @@
     "ambientTrack": 1,
     "ambientVolume": 20,
     "keepAmbient": true,
+    "ambientMixVolume": 0,
     "fadeMs": 500,
     "tracks": [
       {

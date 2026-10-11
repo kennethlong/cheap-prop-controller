@@ -4,6 +4,26 @@ export type TriggerKind = "button" | "pir" | "ultrasonic";
 export type PlayerKind = "dfplayer" | "yx5300";
 export type AudioTransitionMode = "cut" | "crossfade" | "fade-through";
 
+export type ZoneAction =
+  | { id: string; kind: "state"; stateId: string }
+  | {
+      id: string;
+      kind: "volume";
+      target: "ambient" | "foreground";
+      volume: number;
+      fadeMs: number;
+    };
+export interface DistanceZone {
+  id: string;
+  name: string;
+  /** Inclusive whole-centimeter bounds within the HC-SR04 measurement range. */
+  minCm: number;
+  maxCm: number;
+  hysteresisCm: number;
+  onEnter: ZoneAction[];
+  onExit: ZoneAction[];
+}
+
 export interface OutputConfig {
   id: string;
   name: string;
@@ -23,6 +43,9 @@ export interface TriggerConfig {
   debounceMs: number;
   thresholdCm: number;
   hysteresisCm: number;
+  /** Omitted in existing projects: use the original single threshold. */
+  distanceMode?: "threshold" | "zones";
+  zones?: DistanceZone[];
 }
 export interface AudioPlayer {
   id: string;
@@ -96,7 +119,13 @@ export const LIMITS = {
   tickMs: 50,
   maxDurationMs: 65535 * 50,
   maxTrack: 255,
+  zones: 32,
+  zoneActions: 64,
 } as const;
+
+export function isZonedTrigger(trigger: TriggerConfig): boolean {
+  return trigger.kind === "ultrasonic" && trigger.distanceMode === "zones";
+}
 
 export interface ValidationIssue {
   path: string;

@@ -385,6 +385,83 @@ static void testSameTrackInDifferentRoles() {
   engine.enter(0, 3500); advance(engine, 3500, 4500);
   assert(commands(Serial1, 0x0f, 0x0101) == 3);
 }
+static void testVolumeActions() {
+  for (uint8_t kind = 0; kind < 2; ++kind) for (uint8_t mode = 0; mode < 3; ++mode) {
+    mixedFixture(mode != 0, kind, 400, 200);
+    if (mode == 2) { bytes[16] &= ~2; bytes[17] = bytes[19] = 0; }
+    cpc::AudioEngine engine;
+    engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, 3500);
+    engine.volume(1, 30, 0, 3500); // No foreground role: never invent playback.
+    engine.volume(0, 4, 200, 3500); advance(engine, 3500, 4000);
+    assert(commandAt(Serial1, 0x06, 4, 3500) >= 3700);
+    assert(commands(Serial1, 0x0f) == 1 && commands(Serial2, 0x0f) == 0);
+    engine.enter(1, 4000);
+    engine.volume(1, 0, 0, 4000); // Pending/startup track must stay alive silently.
+    engine.volume(0, 3, 0, 4000); advance(engine, 4000, 5200);
+    assert(commands(Serial2, 0x0f, 0x0102) == 1);
+    assert(commands(Serial2, 0x16) == 1); // Boot STOP only.
+    assert(commandAt(Serial2, 0x06, 25, 4000) == UINT32_MAX);
+    assert(commandAt(Serial1, 0x06, 3, 4000) != UINT32_MAX);
+    engine.volume(1, 12, 250, 5200); advance(engine, 5200, 6000);
+    assert(commandAt(Serial2, 0x06, 12, 5200) >= 5450);
+    assert(commands(Serial2, 0x0f, 0x0102) == 1); // Volume-up keeps playhead.
+    engine.enter(2, 6000); engine.volume(1, 7, 100, 6000); advance(engine, 6000, 7500);
+    const HardwareSerial& incoming = mode ? Serial2 : Serial3;
+    assert(commandAt(incoming, 0x06, 7, 6000) != UINT32_MAX);
+    if (!mode) assert(commandAt(Serial2, 0x06, 7, 6000) == UINT32_MAX); // Never raise retiring voice.
+    assert(commandAt(Serial1, 0x06, 8, 6000) != UINT32_MAX); // State entry clears ambient override.
+    engine.enter(0, 7500); advance(engine, 7500, 9000);
+    assert(commandAt(Serial1, 0x06, 20, 7500) != UINT32_MAX);
+    assert(commands(Serial1, 0x0f) == 1);
+    engine.stop(9000); engine.volume(0, 30, 0, 9000); engine.volume(1, 30, 0, 9000);
+    advance(engine, 9000, 9500); assert(engine.stopped());
+    assert(commandAt(Serial1, 0x06, 30, 9000) == UINT32_MAX);
+  }
+}
+static void testVolumePendingAndZeroDefaults() {
+  // A normal ambient volume of zero still leaves a logical voice to adjust.
+  for (uint8_t sequential = 0; sequential < 2; ++sequential) {
+    mixedFixture(sequential != 0); bytes[18] = 0;
+    cpc::AudioEngine engine; engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, 3500);
+    engine.volume(0, 9, 0, 3500); advance(engine, 3500, 3900);
+    assert(commands(Serial1, 0x0f, 0x0101) == 1 && commands(Serial1, 0x16) == 1);
+    assert(commandAt(Serial1, 0x06, 9, 3500) != UINT32_MAX);
+  }
+  // Overrides before decoder initialization apply to the eventual target.
+  sequentialFixture(false, 500, 100);
+  cpc::AudioEngine engine; engine.begin(&image, 0); engine.enter(1, 0);
+  engine.volume(1, 11, 900, 0); advance(engine, 0, 4000);
+  const uint32_t loop = commandAt(Serial1, 0x19, 1);
+  assert(commandAt(Serial1, 0x06, 11) >= loop + 900);
+  assert(commands(Serial1, 0x06, 25) == 0);
+  engine.enter(0, 4000); engine.volume(0, 6, 700, 4000); advance(engine, 4000, 6000);
+  assert(commandAt(Serial1, 0x06, 6, 4000) != UINT32_MAX);
+  assert(commandAt(Serial1, 0x06, 20, 4000) == UINT32_MAX);
+  engine.enter(1, 6000); engine.volume(1, 0, 0, 6000);
+  engine.enter(2, 6100); advance(engine, 6100, 8000);
+  assert(commandAt(Serial1, 0x06, 30, 6100) != UINT32_MAX); // Latest state clears old override.
+
+  // A silent persistent ambient can be raised during handoff without blocking
+  // foreground readiness. Another state clears it even while still pending.
+  sequentialFixture(true, 800, 100);
+  engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, 3500);
+  engine.enter(1, 3500); engine.volume(0, 6, 0, 3500); advance(engine, 3500, 4500);
+  assert(commandAt(Serial1, 0x06, 6, 3500) != UINT32_MAX);
+  assert(commands(Serial2, 0x0f, 0x0102) == 1);
+  engine.enter(2, 4500); engine.volume(0, 11, 0, 4500); advance(engine, 4500, 4600);
+  engine.enter(1, 4600); advance(engine, 4600, 6500);
+  assert(commandAt(Serial1, 0x06, 0, 4600) != UINT32_MAX);
+  assert(commandAt(Serial2, 0x06, 25, 4600) != UINT32_MAX);
+  assert(commands(Serial2, 0x0f, 0x0103) == 0);
+
+  // Ambient that is only retiring under a nonpersistent foreground is not a
+  // logical ambient role, even while the old decoder remains audible.
+  fixture(); bytes[16] = 0;
+  engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, 3500);
+  engine.enter(1, 3500); engine.volume(0, 30, 0, 3500); advance(engine, 3500, 4500);
+  assert(commandAt(Serial1, 0x06, 30, 3500) == UINT32_MAX);
+  assert(commands(Serial1, 0x16) == 2);
+}
 int main() {
   fixture(); cpc::AudioEngine engine;
   engine.begin(&image, 0); engine.enter(0, 0);
@@ -419,5 +496,6 @@ int main() {
   testSameTrackInDifferentRoles();
   testSequentialDurations(); testSequentialLatestAndStop(); testSequentialPersistentAmbient(); testSequentialPacketCancellation();
   testMixedAmbientTransitions(); testMixedLatestAndStop(); testMixedStartupAndCancellation();
-  puts("Audio host tests passed: framing, crossfade/cut/sequential fades, continuous ambient mixing, latest target, startup, STOP, echo scheduling.");
+  testVolumeActions(); testVolumePendingAndZeroDefaults();
+  puts("Audio host tests passed: role-volume actions, zero-volume continuity, pending overrides, retirement, framing, crossfade/cut/sequential fades, ambient mixing, startup, STOP, echo scheduling.");
 }
