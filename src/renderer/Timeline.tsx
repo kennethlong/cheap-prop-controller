@@ -42,6 +42,9 @@ interface Props {
   waveformLoop?: boolean;
   previewState: string;
   onTrigger(id: string): void;
+  onRelease(id: string): void;
+  onAudioFinished(): void;
+  canFinishAudio: boolean;
   enabledTriggers: string[];
   onDistance(id: string, distanceCm: number | null): void;
   distances: SimulatorSnapshot["distances"];
@@ -61,6 +64,7 @@ export function Timeline(props: Props) {
     props.onDistance(id, text === "" ? null : Number(text));
   };
   const [zoom, setZoom] = useState(32);
+  const [drawActive, setDrawActive] = useState(true);
   const [viewport, setViewport] = useState(600);
   const [labelWidth, setLabelWidth] = useState(
     window.innerWidth <= 980 ? 105 : 133,
@@ -133,6 +137,7 @@ export function Timeline(props: Props) {
       outputId: current.outputId,
       startMs,
       endMs,
+      active: drawActive,
     };
     props.onEvents([...state.events, event]);
     props.onSelect(event.id);
@@ -183,6 +188,15 @@ export function Timeline(props: Props) {
           / {time(state.durationMs)}
         </span>
         <div className="grow" />
+        <select
+          className="draw-value"
+          aria-label="Draw output value"
+          value={drawActive ? "on" : "off"}
+          onChange={(event) => setDrawActive(event.target.value === "on")}
+        >
+          <option value="on">Draw ON</option>
+          <option value="off">Draw OFF</option>
+        </select>
         <span className="snap-label">50 ms snap</span>
         <div className="toolbar-separator" />
         <button
@@ -396,7 +410,7 @@ export function Timeline(props: Props) {
                   .map((event) => (
                     <button
                       key={event.id}
-                      className={`event ${props.selectedEvent === event.id ? "selected" : ""}`}
+                      className={`event ${event.active === false ? "event-off" : ""} ${props.selectedEvent === event.id ? "selected" : ""}`}
                       style={{
                         left: event.startMs * pixelsPerMs,
                         width: (event.endMs - event.startMs) * pixelsPerMs,
@@ -405,12 +419,12 @@ export function Timeline(props: Props) {
                         color: output.color,
                       }}
                       aria-label={`${output.name} event ${event.startMs / 1000} to ${event.endMs / 1000} seconds`}
-                      title={`${output.name}: ${time(event.startMs)} → ${time(event.endMs)}`}
+                      title={`${output.name} ${event.active === false ? "OFF" : "ON"}: ${time(event.startMs)} → ${time(event.endMs)}`}
                       onPointerDown={(e) => e.stopPropagation()}
                       onClick={() => props.onSelect(event.id)}
                     >
                       {(event.endMs - event.startMs) * pixelsPerMs > 55
-                        ? `${((event.endMs - event.startMs) / 1000).toFixed(1)} s`
+                        ? `${event.active === false ? "OFF · " : ""}${((event.endMs - event.startMs) / 1000).toFixed(1)} s`
                         : ""}
                     </button>
                   ))}
@@ -498,6 +512,28 @@ export function Timeline(props: Props) {
                 {trigger.name}
               </button>
             ))}
+          {project.triggers
+            .filter(
+              (trigger) => trigger.kind !== "timer" && !isZonedTrigger(trigger),
+            )
+            .map((trigger) => (
+              <button
+                key={`release-${trigger.id}`}
+                className="ghost small"
+                disabled={!props.started}
+                aria-label={`Release ${trigger.name}`}
+                onClick={() => props.onRelease(trigger.id)}
+              >
+                Release {trigger.name}
+              </button>
+            ))}
+          <button
+            className="ghost small"
+            disabled={!props.started || !props.canFinishAudio}
+            onClick={props.onAudioFinished}
+          >
+            Finish audio
+          </button>
         </div>
         <span className="hint">Triggers here affect preview only.</span>
         {project.triggers.some((trigger) => trigger.kind === "ultrasonic") && (
@@ -570,7 +606,7 @@ export function Timeline(props: Props) {
                       {reading?.distanceCm == null
                         ? isZonedTrigger(trigger)
                           ? "No echo: the last zone stays active."
-                          : "No echo: the threshold input releases."
+                          : "No echo: the last valid threshold state is held."
                         : `Hold the distance for ${trigger.debounceMs} ms to confirm a change.`}
                     </p>
                   </div>

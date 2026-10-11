@@ -15,18 +15,20 @@ struct DebouncedInput {
   bool candidate;
   bool stable;
   bool ready;
+  bool activated;
   void reset(bool active, uint32_t now) {
-    changedAt = now; candidate = stable = active; ready = !active;
+    changedAt = now; candidate = stable = active; ready = !active; activated = false;
   }
-  bool update(bool active, uint32_t now, uint16_t debounceMs) {
+  uint8_t updateEdges(bool active, uint32_t now, uint16_t debounceMs) {
     if (active != candidate) { candidate = active; changedAt = now; }
     if (candidate != stable && static_cast<uint32_t>(now - changedAt) >= debounceMs) {
       stable = candidate;
-      if (!stable) ready = true;
-      else if (ready) { ready = false; return true; }
+      if (!stable) { ready = true; const bool release = activated; activated = false; return release ? 2 : 0; }
+      else if (ready) { ready = false; activated = true; return 1; }
     }
     return false;
   }
+  bool update(bool active, uint32_t now, uint16_t debounceMs) { return updateEdges(active, now, debounceMs) & 1; }
 };
 
 // DFPlayer uses a checksum; Catalex YX5300 accepts its documented 8-byte form.

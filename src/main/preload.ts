@@ -9,6 +9,10 @@ const api: DesktopAPI = {
   learnIr: () => ipcRenderer.invoke("device:ir-learn"),
   testIr: (command) => ipcRenderer.invoke("device:ir-test", command),
   cancelIr: () => ipcRenderer.invoke("device:ir-cancel"),
+  beginOutputTest: (expectedScene) =>
+    ipcRenderer.invoke("device:output-test-begin", expectedScene),
+  setTestOutputs: (mask) => ipcRenderer.invoke("device:output-test-set", mask),
+  endOutputTest: () => ipcRenderer.invoke("device:output-test-end"),
   uploadScene: (bytes) => ipcRenderer.invoke("device:upload", bytes),
   flashFirmware: (board, port, variant) =>
     ipcRenderer.invoke("device:flash", board, port, variant),

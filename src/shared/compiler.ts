@@ -6,6 +6,11 @@ import {
 import type { BoardId, SceneProject, ValidationIssue } from "./model";
 import { isZonedTrigger } from "./model";
 import {
+  timerInterval,
+  transitionTargets,
+  usesSceneControls,
+} from "./scene-controls";
+import {
   estimateSceneBytes,
   validateProject,
   validateProjectStructure,
@@ -87,7 +92,7 @@ export function compileProject(project: SceneProject): CompiledScene {
       : [],
   );
   const ir = project.ir?.enabled ? project.ir : undefined;
-  bytes.set([0x43, 0x50, 0x43, 0x31]);
+  bytes.set([0x43, 0x50, 0x43, usesSceneControls(project) ? 0x32 : 0x31]);
   u16(4, usedBytes);
   bytes[8] = BOARD_CODES[project.board];
   bytes[9] = project.outputs.length;
@@ -122,9 +127,15 @@ export function compileProject(project: SceneProject): CompiledScene {
   });
   project.triggers.forEach((trigger, index) => {
     const offset = triggerOffset + index * BINARY.trigger;
-    bytes[offset] = ({ button: 0, pir: 1, ultrasonic: 2 } as const)[
+    bytes[offset] = ({ button: 0, pir: 1, ultrasonic: 2, timer: 3 } as const)[
       trigger.kind
     ];
+    if (trigger.kind === "timer") {
+      bytes[offset + 1] = bytes[offset + 2] = 255;
+      bytes[offset + 3] = trigger.timerResetOnTrigger ? 1 : 0;
+      u16(offset + 4, timerInterval(trigger) / 50);
+      return;
+    }
     bytes[offset + 1] = trigger.pin!;
     bytes[offset + 2] = trigger.echoPin ?? 255;
     bytes[offset + 3] = (trigger.activeLow ? 1 : 0) | (trigger.pullup ? 2 : 0);
@@ -137,6 +148,9 @@ export function compileProject(project: SceneProject): CompiledScene {
     bytes[offset] = player.kind === "dfplayer" ? 0 : 1;
     bytes[offset + 1] = player.txPin!;
     bytes[offset + 2] = player.rxPin!;
+    if (player.feedback)
+      bytes[offset + 3] =
+        (player.feedback.pin! + 1) | (player.feedback.activeLow ? 0 : 128);
   });
   let eventIndex = 0;
   let transitionIndex = 0;
@@ -147,10 +161,18 @@ export function compileProject(project: SceneProject): CompiledScene {
     u16(offset + 4, eventIndex);
     u16(offset + 6, state.events.length);
     u16(offset + 8, transitionIndex);
-    bytes[offset + 10] = state.transitions.length;
+    bytes[offset + 10] = state.transitions.reduce(
+      (count, transition) => count + transitionTargets(transition).length,
+      0,
+    );
     bytes[offset + 11] = state.volume;
     bytes[offset + 12] =
       (state.loopTimeline ? 1 : 0) | (state.loopAudio ? 2 : 0);
+    if (state.audioEndStateId)
+      bytes[offset + 13] =
+        project.states.findIndex(
+          (target) => target.id === state.audioEndStateId,
+        ) + 1;
     const sortedEvents = [...state.events].sort(
       (a, b) =>
         a.startMs - b.startMs ||
@@ -164,16 +186,20 @@ export function compileProject(project: SceneProject): CompiledScene {
       bytes[eventRecord + 4] = project.outputs.findIndex(
         (output) => output.id === event.outputId,
       );
+      bytes[eventRecord + 5] = event.active === false ? 1 : 0;
     });
     state.transitions.forEach((transition) => {
-      const transitionRecord =
-        transitionOffset + transitionIndex++ * BINARY.transition;
-      bytes[transitionRecord] = project.triggers.findIndex(
-        (trigger) => trigger.id === transition.triggerId,
-      );
-      bytes[transitionRecord + 1] = project.states.findIndex(
-        (target) => target.id === transition.targetStateId,
-      );
+      for (const target of transitionTargets(transition)) {
+        const transitionRecord =
+          transitionOffset + transitionIndex++ * BINARY.transition;
+        bytes[transitionRecord] =
+          project.triggers.findIndex(
+            (trigger) => trigger.id === transition.triggerId,
+          ) | (transition.edge === "release" ? 128 : 0);
+        bytes[transitionRecord + 1] = project.states.findIndex(
+          (state) => state.id === target,
+        );
+      }
     });
   });
   if (zones.length || ir) {
@@ -271,7 +297,7 @@ export function verifySceneChecksum(bytes: Uint8Array): boolean {
     bytes[0] !== 0x43 ||
     bytes[1] !== 0x50 ||
     bytes[2] !== 0x43 ||
-    bytes[3] !== 0x31
+    (bytes[3] !== 0x31 && bytes[3] !== 0x32)
   )
     return false;
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);

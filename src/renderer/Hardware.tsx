@@ -279,34 +279,86 @@ export function Hardware({
                           t.kind = e.target.value as typeof t.kind;
                           t.activeLow = t.kind === "button";
                           t.pullup = t.kind === "button";
+                          if (t.kind === "timer") {
+                            t.timerIntervalMs ??= 30000;
+                            t.timerResetOnTrigger ??= false;
+                            next.states.forEach((state) => {
+                              state.transitions = state.transitions.filter(
+                                (transition) =>
+                                  transition.triggerId !== t.id ||
+                                  transition.edge !== "release",
+                              );
+                            });
+                          }
                         })
                       }
                     >
                       <option value="button">Button / foot pad</option>
                       <option value="pir">PIR motion sensor</option>
                       <option value="ultrasonic">HC-SR04 ultrasonic</option>
+                      <option value="timer">Periodic timer · no pin</option>
                     </select>
                   </label>
-                  <label>
-                    Debounce / dwell (ms)
-                    <input
-                      aria-label={`Trigger ${index + 1} debounce`}
-                      type="number"
-                      min="0"
-                      max="5000"
-                      step="50"
-                      value={trigger.debounceMs}
-                      onChange={(e) =>
-                        change((next) => {
-                          next.triggers[index].debounceMs = Number(
-                            e.target.value,
-                          );
-                        })
-                      }
-                    />
-                  </label>
+                  {trigger.kind !== "timer" && (
+                    <label>
+                      Debounce / dwell (ms)
+                      <input
+                        aria-label={`Trigger ${index + 1} debounce`}
+                        type="number"
+                        min="0"
+                        max="5000"
+                        step="50"
+                        value={trigger.debounceMs}
+                        onChange={(e) =>
+                          change((next) => {
+                            next.triggers[index].debounceMs = Number(
+                              e.target.value,
+                            );
+                          })
+                        }
+                      />
+                    </label>
+                  )}
                 </div>
-                {trigger.kind === "ultrasonic" ? (
+                {trigger.kind === "timer" ? (
+                  <>
+                    <label>
+                      Interval (seconds)
+                      <input
+                        aria-label={`Trigger ${index + 1} timer seconds`}
+                        type="number"
+                        min="0.05"
+                        max="3276.75"
+                        step="0.05"
+                        value={(trigger.timerIntervalMs ?? 30000) / 1000}
+                        onChange={(e) =>
+                          change((next) => {
+                            next.triggers[index].timerIntervalMs =
+                              Math.round(Number(e.target.value) * 20) * 50;
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="check">
+                      <input
+                        aria-label={`Trigger ${index + 1} restart timer`}
+                        type="checkbox"
+                        checked={trigger.timerResetOnTrigger ?? false}
+                        onChange={(e) =>
+                          change((next) => {
+                            next.triggers[index].timerResetOnTrigger =
+                              e.target.checked;
+                          })
+                        }
+                      />
+                      Restart countdown when another input activates
+                    </label>
+                    <p className="hint">
+                      Repeats while the controller is armed. Arm / reset starts
+                      a full interval; state changes keep the countdown running.
+                    </p>
+                  </>
+                ) : trigger.kind === "ultrasonic" ? (
                   <>
                     <label>
                       Distance behavior
@@ -426,9 +478,11 @@ export function Hardware({
                   </div>
                 )}
                 <div className="pin-label">
-                  {trigger.kind === "ultrasonic"
-                    ? `TRIG ${pinLabel(project.board, trigger.pin)} · ECHO ${pinLabel(project.board, trigger.echoPin)}`
-                    : `INPUT ${pinLabel(project.board, trigger.pin)}`}
+                  {trigger.kind === "timer"
+                    ? "SOFTWARE TIMER · No GPIO used"
+                    : trigger.kind === "ultrasonic"
+                      ? `TRIG ${pinLabel(project.board, trigger.pin)} · ECHO ${pinLabel(project.board, trigger.echoPin)}`
+                      : `INPUT ${pinLabel(project.board, trigger.pin)}`}
                 </div>
               </div>
             ))}
@@ -440,9 +494,9 @@ export function Hardware({
             </div>
           )}
           <p className="hint">
-            Triggers fire on a new activation and must release before firing
-            again. Ultrasonic sensors can use a single threshold or multiple
-            distance zones with their own actions.
+            Sensor transitions can respond to activation or release. Periodic
+            timers fire without consuming a pin. Ultrasonic sensors can use a
+            single threshold or multiple distance zones with their own actions.
           </p>
         </section>
         <section className="card full">
@@ -564,9 +618,9 @@ export function Hardware({
             </tbody>
           </table>
           <p className="hint">
-            Events make a channel active. Outside events, it returns to its idle
-            value. Active-low affects the electrical pin level; it does not
-            reverse the timeline display.
+            Events explicitly turn a channel ON or OFF. Outside events, it
+            returns to its idle value. Active-low affects the electrical pin
+            level; it does not reverse the timeline display.
           </p>
         </section>
         <section className="card full">
@@ -587,6 +641,7 @@ export function Hardware({
                   <th>Type</th>
                   <th>Controller TX → module RX</th>
                   <th>Controller RX ← module TX</th>
+                  <th>Playback feedback</th>
                 </tr>
               </thead>
               <tbody>
@@ -614,6 +669,49 @@ export function Hardware({
                     <td className="pin-label">
                       {pinLabel(project.board, player.rxPin)}
                     </td>
+                    <td>
+                      <label className="check">
+                        <input
+                          type="checkbox"
+                          aria-label={`Player ${index + 1} BUSY feedback`}
+                          checked={!!player.feedback}
+                          onChange={(e) =>
+                            change((next) => {
+                              if (e.target.checked)
+                                next.audio.players[index].feedback = {
+                                  pin: null,
+                                  activeLow: true,
+                                };
+                              else delete next.audio.players[index].feedback;
+                            })
+                          }
+                        />
+                        Use BUSY pin
+                      </label>
+                      {player.feedback && (
+                        <>
+                          <span className="pin-label">
+                            BUSY →{" "}
+                            {pinLabel(project.board, player.feedback.pin)}
+                          </span>
+                          <label className="check">
+                            <input
+                              type="checkbox"
+                              aria-label={`Player ${index + 1} BUSY active low`}
+                              checked={player.feedback.activeLow}
+                              onChange={(e) =>
+                                change((next) => {
+                                  next.audio.players[
+                                    index
+                                  ].feedback!.activeLow = e.target.checked;
+                                })
+                              }
+                            />
+                            Low while playing
+                          </label>
+                        </>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -624,6 +722,14 @@ export function Hardware({
               devices.
             </p>
           )}
+          <p className="hint">
+            Optional BUSY feedback uses one input per player and reports
+            playback in the physical controller panel. Enable it only when your
+            module exposes a documented playback-status pin. DFPlayer Mini
+            normally uses active-low BUSY; many YX5300 boards do not expose one.
+            A missing or incorrectly wired signal can prevent an audio-finished
+            transition.
+          </p>
           <p className="hint">
             Player count follows simultaneous playback needs. Fade out / fade in
             can switch tracks on one player. Crossfading uses two players;

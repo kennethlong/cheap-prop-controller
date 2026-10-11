@@ -1288,6 +1288,86 @@ a {
 .modal .row {
   justify-content: flex-end;
 }
+.recording-modal {
+  width: 760px;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
+.record-progress {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+}
+.record-lanes {
+  display: grid;
+  gap: 8px;
+  max-height: 38vh;
+  overflow-y: auto;
+}
+.record-lane {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) 170px 110px;
+  align-items: center;
+  gap: 12px;
+}
+.recording-modal progress {
+  width: 100%;
+  accent-color: #83d8b1;
+}
+.record-lane button[aria-pressed="true"] {
+  background: #287654;
+  border-color: #83d8b1;
+}
+.record-lane kbd {
+  min-width: 19px;
+  border: 1px solid #5b697a;
+  border-radius: 3px;
+}
+.event.event-off {
+  background-image: repeating-linear-gradient(
+    135deg,
+    transparent,
+    transparent 4px,
+    #0b111d88 4px,
+    #0b111d88 8px
+  ) !important;
+  border-style: dashed;
+}
+.draw-value {
+  width: 108px;
+}
+.test-output-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+.test-output {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid #354256;
+  border-radius: 6px;
+}
+.test-output > span {
+  flex: 1;
+}
+.hardware-testing {
+  margin: 0 17px 12px;
+  padding: 12px;
+  border: 1px solid #4b6178;
+  border-radius: 7px;
+  max-height: 32vh;
+  overflow-y: auto;
+}
+.hardware-testing .row {
+  margin-bottom: 9px;
+}
+.transition-targets {
+  display: grid;
+  gap: 5px;
+  padding: 7px 0;
+}
 @media (max-width: 1180px) {
   .scene-sidebar {
     width: 174px;

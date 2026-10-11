@@ -12,11 +12,12 @@
 static uint32_t fakeMillis = 0;
 static void (*afterPrint)() = nullptr;
 static uint8_t pins[70] = {};
+static uint32_t pinReads[70] = {};
 static const uint8_t LOW = 0, HIGH = 1, INPUT = 0, OUTPUT = 1, INPUT_PULLUP = 2;
 static uint32_t millis() { return fakeMillis; }
 static uint32_t micros() { return fakeMillis * 1000; }
 static void digitalWrite(uint8_t pin, uint8_t value) { pins[pin] = value; }
-static int digitalRead(uint8_t pin) { return pins[pin]; }
+static int digitalRead(uint8_t pin) { ++pinReads[pin]; return pins[pin]; }
 static void pinMode(uint8_t pin, uint8_t mode) { if (mode == INPUT_PULLUP) pins[pin] = HIGH; }
 struct __FlashStringHelper {};
 #define F(value) reinterpret_cast<const __FlashStringHelper*>(value)
@@ -226,8 +227,115 @@ static void testIrCommands(const char* emptyScene) {
   Serial.text.clear(); fakeMillis += 11000; loop(); assert(Serial.text.empty()); // No stale capture after cancel.
   assert(!memcmp(saved, EEPROM.bytes, sizeof(saved))); // Training/testing is entirely in RAM.
 }
+static void outputFixture() {
+  stop(); memset(EEPROM.bytes, 0, sizeof(EEPROM.bytes));
+  uint8_t* b = EEPROM.bytes; memcpy(b, "CPC2", 4); word(4, 52);
+  b[8] = 4; b[9] = 2; b[12] = 1;
+  word(20, 32); word(22, 36); word(24, 36); word(26, 36); word(28, 52); word(30, 52);
+  b[32] = 4; b[33] = 3; b[34] = 5; word(36, 20); b[48] = 1;
+  word(6, image.crc(52)); assert(image.valid(4096, 4));
+  Serial = HostSerial{}; fakeMillis = 0; validScene = true; uploading = virtualMagic = beginPending = false;
+  setupScene(); assert(outputMask == 1 && pins[4] == LOW);
+}
+static void beginTest() {
+  char text[48]; sprintf(text, "TESTBEGIN %u %u", image.u16(4), image.u16(6)); send(text);
+}
+static void testOutputTestMode() {
+  outputFixture(); uint8_t saved[4096]; memcpy(saved, EEPROM.bytes, sizeof(saved));
+  send("TESTBEGIN 52 0"); assert(engine.running && !testingOutputs && outputMask == 1);
+  send("TESTBEGIN 51 0"); assert(engine.running && !testingOutputs);
+  beginTest(); assert(testingOutputs && !engine.running && outputMask == 0 && pins[4] == HIGH && pins[5] == LOW);
+  send("TEST 1"); assert(outputMask == 1 && pins[4] == LOW && pins[5] == LOW);
+  fakeMillis = 1000; send("TEST 2"); assert(outputMask == 2 && pins[4] == HIGH && pins[5] == HIGH);
+  send("TEST 4"); assert(outputMask == 2);
+  send("TEST -1"); assert(outputMask == 2);
+  send("TEST 4294967296"); assert(outputMask == 2);
+  send("RUN"); send("RESET"); send("TRIGGER 0"); send("IRLEARN"); send("BEGIN 52 0");
+  assert(testingOutputs && !engine.running && !uploading && outputMask == 2);
+  assert(!memcmp(saved, EEPROM.bytes, sizeof(saved)));
+  fakeMillis = 2499; loop(); assert(testingOutputs && outputMask == 2);
+  fakeMillis = 2500; loop(); assert(!testingOutputs && !engine.running && !outputMask && pins[4] == HIGH && pins[5] == LOW);
+  send("TEST 1"); assert(!testingOutputs && !outputMask);
+  beginTest(); send("TEST 3"); assert(outputMask == 3);
+  fakeMillis = 3000; send("TEST 0"); assert(testingOutputs && !outputMask);
+  fakeMillis = 4499; loop(); assert(testingOutputs);
+  send("STOP"); assert(!testingOutputs && !outputMask && !engine.running);
+  assert(!memcmp(saved, EEPROM.bytes, sizeof(saved)));
+  fakeMillis = 0xfffffff0UL; beginTest(); send("TEST 3");
+  fakeMillis = 0x5cbUL; loop(); assert(testingOutputs);
+  fakeMillis = 0x5ccUL; send("TEST 1"); assert(!testingOutputs && !outputMask); // Expired command cannot renew itself.
+  Serial.text.clear(); send("STATUS");
+  assert(Serial.text.find("\"testingOutputs\":false") != std::string::npos);
+  assert(Serial.text.find("\"sceneControls\":true") != std::string::npos);
+  assert(Serial.text.find("\"outputTest\":true") != std::string::npos);
+}
+static void testCpc2UploadCommit() {
+  outputFixture(); const uint16_t length = image.u16(4), crc = image.u16(6);
+  uint8_t saved[52]; memcpy(saved, EEPROM.bytes, sizeof(saved));
+  char text[96]; sprintf(text, "BEGIN %u %u", length, crc); send(text); loop();
+  assert(uploading && !beginPending && !validScene && EEPROM.bytes[0] == 0);
+  for (uint16_t offset = 0; offset < length;) {
+    const uint8_t count = length - offset > 32 ? 32 : static_cast<uint8_t>(length - offset);
+    int written = sprintf(text, "DATA %u ", offset);
+    for (uint8_t i = 0; i < count; ++i) written += sprintf(text + written, "%02x", saved[offset + i]);
+    send(text); offset += count;
+  }
+  assert(uploadVersion == '2' && image.b(3) == '2' && EEPROM.bytes[0] == 0);
+  send("COMMIT"); assert(validScene && !uploading && !virtualMagic && engine.running);
+  assert(!memcmp(saved, EEPROM.bytes, sizeof(saved)) && image.valid(4096, 4));
+}
+static void testFeedbackEchoScheduling() {
+  fixture(); EEPROM.bytes[3] = '2';
+  EEPROM.bytes[51] = 7; EEPROM.bytes[55] = 8; EEPROM.bytes[59] = 9;
+  word(6, image.crc(image.u16(4))); assert(image.valid(4096, 4)); setupScene();
+  memset(pinReads, 0, sizeof(pinReads));
+  fakeMillis = 100; sonarPhase = 2; sonarIndex = 0; sonarAt = micros(); pins[3] = LOW;
+  loop(); assert(sonarPhase == 2 && !pinReads[6] && !pinReads[7] && !pinReads[8]);
+  send("STATUS"); assert(!pinReads[6] && !pinReads[7] && !pinReads[8]); // Status reports cached BUSY.
+  sonarPhase = 0; sonarNext = micros() + 60000; loop();
+  assert(pinReads[6] == 1 && pinReads[7] == 1 && pinReads[8] == 1);
+  ++fakeMillis; loop(); assert(pinReads[6] == 1); //10ms minimum polling interval.
+  fakeMillis += 9; loop(); assert(pinReads[6] == 2);
+}
+static void feedbackControllerFixture() {
+  fixture(); EEPROM.bytes[3] = '2';
+  EEPROM.bytes[51] = 7; EEPROM.bytes[55] = 8; EEPROM.bytes[59] = 9;
+  EEPROM.bytes[89] = EEPROM.bytes[105] = 1;
+  pins[6] = pins[7] = pins[8] = HIGH;
+  word(6, image.crc(image.u16(4))); assert(image.valid(4096, 4)); setupScene();
+  advance(4000); send("TRIGGER 1"); advance(5000);
+  assert(engine.currentState == 1);
+}
+static void feedbackLoop(uint32_t at) { fakeMillis = at; sonarPhase = 0; sonarNext = micros() + 60000; loop(); }
+static void testAudioEndControllerPriority() {
+  feedbackControllerFixture();
+  pins[7] = LOW; feedbackLoop(5000); feedbackLoop(5100);
+  assert(audio.feedbackStatus(1) == cpc::AudioFeedback::Playing);
+  pins[7] = HIGH; feedbackLoop(5200); assert(engine.currentState == 1);
+  feedbackLoop(5300); assert(engine.currentState == 0 && engine.enteredAt == 5300);
+
+  feedbackControllerFixture();
+  pins[7] = LOW; feedbackLoop(5000); feedbackLoop(5100);
+  pins[7] = HIGH; feedbackLoop(5200);
+  pins[4] = LOW; feedbackLoop(5300); // Physical transition to2 wins over old track ending to0.
+  assert(engine.currentState == 2 && engine.enteredAt == 5300);
+
+  feedbackControllerFixture();
+  pins[7] = LOW; feedbackLoop(5000); feedbackLoop(5100);
+  pins[7] = HIGH; feedbackLoop(5200);
+  changedSensor = 0; exitedZone = 255; enteredZone = 0;
+  feedbackLoop(5300); assert(engine.currentState == 2); // Zone actions beat old foreground completion too.
+
+  feedbackControllerFixture(); feedbackLoop(11000);
+  assert(engine.currentState == 1 && audio.feedbackStatus(1) == cpc::AudioFeedback::Failed);
+  Serial.text.clear(); send("STATUS");
+  assert(Serial.text.find("\"feedback\":\"failed\",\"busy\":false") != std::string::npos);
+}
 int main(int argc, char** argv) {
   testOrderedActionTimestamps(); testCommandsAndResetBaseline(); testResidentFadeTimestamp();
   if (argc > 1) { testIrCommands(argv[1]); testIrCompletionTimestamps(argv[1]); }
-  puts("Controller host tests passed: ordered action timestamps, serial logging delay, zone trigger rejection, legacy trigger, RESET/RUN baseline, IR learning/staged playback/EEPROM preservation, STOP cancellation.");
+  testOutputTestMode(); testCpc2UploadCommit();
+  testFeedbackEchoScheduling();
+  testAudioEndControllerPriority();
+  puts("Controller host tests passed: output-test identity/watchdog/polarity/EEPROM preservation, CPC2 upload, BUSY/sonar scheduling and end priority, ordered timestamps, RESET/RUN baseline, IR learning/staged playback, STOP cancellation.");
 }

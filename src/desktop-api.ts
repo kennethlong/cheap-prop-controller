@@ -32,6 +32,9 @@ export interface DesktopAPI {
   learnIr(): Promise<IrSignal>;
   testIr(command: IrCommand): Promise<DeviceReply>;
   cancelIr(): Promise<DeviceReply>;
+  beginOutputTest(expectedScene: number[]): Promise<DeviceReply>;
+  setTestOutputs(mask: number): Promise<DeviceReply>;
+  endOutputTest(): Promise<DeviceReply>;
   uploadScene(bytes: number[]): Promise<DeviceReply>;
   flashFirmware(
     board: BoardId,

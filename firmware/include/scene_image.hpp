@@ -9,6 +9,7 @@ typedef uint8_t (*ReadByte)(uint16_t);
 struct SceneImage {
   ReadByte read;
   uint8_t b(uint16_t offset) const { return read(offset); }
+  bool sceneControls() const { return b(3) == '2'; }
   uint16_t u16(uint16_t offset) const { return static_cast<uint16_t>(b(offset)) | static_cast<uint16_t>(b(offset + 1)) << 8; }
   uint8_t ambientMixVolume() const { return (b(16) >> 2) & 31; }
   bool hasZones() const { return b(16) & 128; }
@@ -47,10 +48,18 @@ struct SceneImage {
     used[pin >> 3] |= mask;
     return true;
   }
+  bool claimFeedback(uint8_t pin, uint8_t board, uint8_t* used) const {
+    if ((board == 2 || board == 3) && (pin == 20 || pin == 21)) {
+      const uint8_t mask = 1 << (pin & 7);
+      if (used[pin >> 3] & mask) return false;
+      used[pin >> 3] |= mask; return true;
+    }
+    return claimPin(pin, board, used);
+  }
   // Validate every offset before dereferencing record data. Firmware never trusts
   // the editor: CRC, board, counts, layout, pin ownership and event bounds agree.
   bool valid(uint16_t capacity, uint8_t board, bool checkCrc = true) const {
-    if (b(0) != 'C' || b(1) != 'P' || b(2) != 'C' || b(3) != '1') return false;
+    if (b(0) != 'C' || b(1) != 'P' || b(2) != 'C' || (b(3) != '1' && b(3) != '2')) return false;
     const uint16_t length = u16(4);
     if (length < HeaderSize || length > capacity || b(8) != board) return false;
     if (b(9) > MaxOutputs || b(10) > MaxTriggers || b(11) > MaxPlayers || !b(12) || b(12) > MaxStates || b(13) >= b(12)) return false;
@@ -88,6 +97,10 @@ struct SceneImage {
     }
     for (uint8_t i = 0; i < b(10); ++i) {
       const uint16_t p = trigger(i);
+      if (b(p) == 3) {
+        if (!sceneControls() || b(p + 1) != 255 || b(p + 2) != 255 || b(p + 3) > 1 || !u16(p + 4) || b(p + 6) || b(p + 7)) return false;
+        continue;
+      }
       if (b(p) > 2 || b(p + 3) > 3 || !claimPin(b(p + 1), board, used)) return false;
       if (b(p) == 2) {
         if (!claimPin(b(p + 2), board, used) || u16(p + 4) < 2 || u16(p + 4) > 400 || !b(p + 6) || u16(p + 4) + b(p + 6) > 400 || b(p + 3)) return false;
@@ -95,17 +108,23 @@ struct SceneImage {
     }
     for (uint8_t i = 0; i < b(11); ++i) {
       const uint16_t p = player(i);
-      if (b(p) > 1 || b(p + 3) || !claimPin(b(p + 1), board, used) || !claimPin(b(p + 2), board, used)) return false;
+      if (b(p) > 1 || !claimPin(b(p + 1), board, used) || !claimPin(b(p + 2), board, used)) return false;
+      if (b(p + 3) && (!sceneControls() || !(b(p + 3) & 127) || !claimFeedback((b(p + 3) & 127) - 1, board, used))) return false;
       if (board == 4 && (b(p + 1) != 18 - 2 * i || b(p + 2) != 19 - 2 * i)) return false;
     }
     const uint16_t totalEvents = (u16(30) - u16(28)) / 6;
     const uint16_t totalTransitions = (transitionEnd() - u16(30)) / 2;
+    if (totalTransitions > 128) return false;
     uint16_t eventsSeen = 0, transitionsSeen = 0;
     bool hasForeground = false, multipleForeground = false;
     uint8_t firstForeground = 0;
     for (uint8_t i = 0; i < b(12); ++i) {
       const uint16_t p = state(i), count = u16(p + 6);
-      if (!u16(p) || u16(p + 2) > 255 || u16(p + 4) != eventsSeen || count > totalEvents - eventsSeen || u16(p + 8) != transitionsSeen || b(p + 10) > totalTransitions - transitionsSeen || b(p + 11) > 30 || b(p + 12) > 3 || b(p + 13) || b(p + 14) || b(p + 15)) return false;
+      if (!u16(p) || u16(p + 2) > 255 || u16(p + 4) != eventsSeen || count > totalEvents - eventsSeen || u16(p + 8) != transitionsSeen || b(p + 10) > totalTransitions - transitionsSeen || b(p + 11) > 30 || b(p + 12) > 3 || b(p + 14) || b(p + 15)) return false;
+      if (b(p + 13)) {
+        if (!sceneControls() || b(p + 13) > b(12) || i == b(13) || !u16(p + 2) || (b(p + 12) & 2)) return false;
+        for (uint8_t j = 0; j < b(11); ++j) if (!b(player(j) + 3)) return false;
+      }
       hasForeground |= u16(p + 2) != 0;
       if (u16(p + 2)) {
         if (firstForeground && firstForeground != u16(p + 2)) multipleForeground = true;
@@ -115,7 +134,7 @@ struct SceneImage {
       uint8_t previousOutput = 0;
       for (uint16_t j = 0; j < count; ++j) {
         const uint16_t e = event(eventsSeen + j);
-        if (u16(e) >= u16(e + 2) || u16(e + 2) > u16(p) || b(e + 4) >= b(9) || b(e + 5)) return false;
+        if (u16(e) >= u16(e + 2) || u16(e + 2) > u16(p) || b(e + 4) >= b(9) || b(e + 5) > (sceneControls() ? 1 : 0)) return false;
         if (j && (u16(e) < previousStart || (u16(e) == previousStart && b(e + 4) < previousOutput))) return false;
         previousStart = u16(e); previousOutput = b(e + 4);
         for (uint16_t k = 0; k < j; ++k) {
@@ -123,11 +142,20 @@ struct SceneImage {
           if (b(earlier + 4) == b(e + 4) && u16(earlier + 2) > u16(e)) return false;
         }
       }
-      uint8_t transitionTriggers = 0;
+      uint16_t transitionTriggers = 0;
+      uint8_t previousKey = 255, destinations = 0;
       for (uint8_t j = 0; j < b(p + 10); ++j) {
         const uint16_t t = transition(transitionsSeen + j);
-        if (b(t) >= b(10) || b(t + 1) >= b(12) || (transitionTriggers & (1 << b(t)))) return false;
-        transitionTriggers |= 1 << b(t);
+        const uint8_t input = b(t) & 7, key = input + ((b(t) & 128) ? 8 : 0);
+        if ((b(t) & 120) || input >= b(10) || b(t + 1) >= b(12)) return false;
+        if ((b(t) & 128) && (!sceneControls() || b(trigger(input)) == 3 || zonedTrigger(input))) return false;
+        if (key == previousKey) { if (!sceneControls()) return false; }
+        else {
+          if (transitionTriggers & (static_cast<uint16_t>(1) << key)) return false;
+          transitionTriggers |= static_cast<uint16_t>(1) << key; destinations = 0; previousKey = key;
+        }
+        if (destinations & (1 << b(t + 1))) return false;
+        destinations |= 1 << b(t + 1);
       }
       eventsSeen += count; transitionsSeen += b(p + 10);
     }
@@ -192,16 +220,47 @@ struct SceneRuntime {
   uint32_t enteredAt;
   uint8_t currentState;
   bool running;
+  uint8_t roundRobin[MaxStates][16];
+  uint32_t timerAt[MaxTriggers];
   void begin(const SceneImage* source) { image = source; enteredAt = 0; currentState = 0; running = false; }
   void enter(uint8_t stateIndex, uint32_t now) { currentState = stateIndex; enteredAt = now; }
-  void run(uint32_t now) { running = true; enter(image->b(13), now); }
+  void run(uint32_t now) {
+    for (uint8_t s = 0; s < MaxStates; ++s) for (uint8_t k = 0; k < 16; ++k) roundRobin[s][k] = 0;
+    for (uint8_t i = 0; i < MaxTriggers; ++i) timerAt[i] = now;
+    running = true; enter(image->b(13), now);
+  }
   void stop() { running = false; }
-  bool trigger(uint8_t edges, uint32_t now) {
+  void resetExternalTimers(uint32_t now) {
+    if (!running) return;
+    for (uint8_t i = 0; i < image->b(10); ++i) {
+      const uint16_t p = image->trigger(i);
+      if (image->b(p) == 3 && (image->b(p + 3) & 1)) timerAt[i] = now;
+    }
+  }
+  uint8_t timerEdges(uint32_t now, bool externalActivation = false) {
+    if (!running) return 0;
+    if (externalActivation) resetExternalTimers(now);
+    uint8_t edges = 0;
+    for (uint8_t i = 0; i < image->b(10); ++i) {
+      const uint16_t p = image->trigger(i);
+      if (image->b(p) == 3 && static_cast<uint32_t>(now - timerAt[i]) >= image->u16(p + 4) * 50UL) { timerAt[i] = now; edges |= 1 << i; }
+    }
+    return edges;
+  }
+  bool trigger(uint8_t edges, uint32_t now, uint8_t releases = 0) {
     if (!running) return false;
     const uint16_t s = image->state(currentState);
-    for (uint8_t i = 0; i < image->b(s + 10); ++i) {
+    for (uint8_t i = 0; i < image->b(s + 10);) {
       const uint16_t t = image->transition(image->u16(s + 8) + i);
-      if (edges & (1 << image->b(t))) { enter(image->b(t + 1), now); return true; }
+      const uint8_t wire = image->b(t), key = (wire & 7) + ((wire & 128) ? 8 : 0);
+      uint8_t count = 1;
+      while (i + count < image->b(s + 10) && image->b(image->transition(image->u16(s + 8) + i + count)) == wire) ++count;
+      if (((wire & 128) ? releases : edges) & (1 << (wire & 7))) {
+        uint8_t& cursor = roundRobin[currentState][key];
+        const uint8_t target = image->b(image->transition(image->u16(s + 8) + i + cursor) + 1);
+        cursor = (cursor + 1) % count; enter(target, now); return true;
+      }
+      i += count;
     }
     return false;
   }
@@ -216,7 +275,10 @@ struct SceneRuntime {
     else if (tick >= duration) return mask;
     for (uint16_t i = 0; i < image->u16(s + 6); ++i) {
       const uint16_t e = image->event(image->u16(s + 4) + i);
-      if (tick >= image->u16(e) && tick < image->u16(e + 2)) mask |= static_cast<uint32_t>(1) << image->b(e + 4);
+      if (tick >= image->u16(e) && tick < image->u16(e + 2)) {
+        const uint32_t bit = static_cast<uint32_t>(1) << image->b(e + 4);
+        if (image->b(e + 5)) mask &= ~bit; else mask |= bit;
+      }
     }
     return mask;
   }

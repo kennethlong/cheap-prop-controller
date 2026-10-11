@@ -291,7 +291,7 @@ describe("ultrasonic distance zone preview", () => {
     expect(simulator.advance(500).stateId).toBe("idle");
   });
 
-  it("keeps the original single-threshold release and rearm behavior", () => {
+  it("requires a valid out-of-range reading to release and rearm a threshold sensor", () => {
     const project = zonedProject();
     sensor(project).distanceMode = "threshold";
     sensor(project).debounceMs = 100;
@@ -306,6 +306,10 @@ describe("ultrasonic distance zone preview", () => {
     simulator.setDistance("distance", 110);
     expect(simulator.advance(100).stateId).toBe("idle");
     simulator.setDistance("distance", null);
+    simulator.advance(100);
+    simulator.setDistance("distance", 90);
+    expect(simulator.advance(100).stateId).toBe("idle");
+    simulator.setDistance("distance", 300);
     simulator.advance(100);
     simulator.setDistance("distance", 90);
     expect(simulator.advance(100).stateId).toBe("scare");

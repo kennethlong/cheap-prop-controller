@@ -43,6 +43,7 @@ import { Hardware, Issues, Media, TrackSelect } from "./Hardware";
 import { Timeline, time } from "./Timeline";
 import { PreviewAudio } from "./audio";
 import { useDevice } from "./DeviceContext";
+import { PerformanceRecorder } from "./PerformanceRecorder";
 
 const initial = createDefaultProject();
 const errorText = (error: unknown) => String(error).replace(/^Error: /, "");
@@ -85,6 +86,7 @@ export function App() {
   const audioEditSequence = useRef(0);
   const [loaded, setLoaded] = useState(new Set<number>());
   const [saving, setSaving] = useState(false);
+  const [recording, setRecording] = useState(false);
   const [mediaReload, setMediaReload] = useState(0);
   const projectRef = useRef(project);
   projectRef.current = project;
@@ -236,6 +238,13 @@ export function App() {
     loadedPaths.current.clear();
   };
   const guarded = (message: string, action: () => void) => {
+    if (device.busy || recording) {
+      notify(
+        "Finish the current operation or press STOP before opening another project.",
+        true,
+      );
+      return;
+    }
     if (dirty) setConfirmAction({ message, action });
     else action();
   };
@@ -430,6 +439,7 @@ export function App() {
   }, [running]);
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
+      if (recording || e.defaultPrevented) return;
       const target = e.target as HTMLElement;
       const editing =
         ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) ||
@@ -772,7 +782,7 @@ export function App() {
 
   return (
     <div className="app">
-      <header className="app-header">
+      <header className="app-header" inert={recording}>
         <div className="brand-icon">
           <Zap size={23} fill="currentColor" />
         </div>
@@ -824,7 +834,7 @@ export function App() {
           </button>
         </div>
       </header>
-      <nav className="workspace-tabs" aria-label="Workspace">
+      <nav className="workspace-tabs" aria-label="Workspace" inert={recording}>
         <button
           className={tab === "scene" ? "active" : ""}
           onClick={() => setTab("scene")}
@@ -855,7 +865,7 @@ export function App() {
           </span>
         </div>
       </nav>
-      <main className="workspace">
+      <main className="workspace" inert={recording}>
         {tab === "scene" && (
           <>
             <aside className="scene-sidebar">
@@ -978,6 +988,17 @@ export function App() {
                   </p>
                 </div>
                 <button
+                  disabled={
+                    !!device.busy || !!errors.length || !project.outputs.length
+                  }
+                  onClick={() => {
+                    stopPreview();
+                    setRecording(true);
+                  }}
+                >
+                  Record performance
+                </button>
+                <button
                   className="icon ghost"
                   disabled={!history.length}
                   aria-label="Undo"
@@ -1045,6 +1066,29 @@ export function App() {
                 }
                 previewState={snapshot?.stateName ?? "Idle"}
                 onTrigger={triggerPreview}
+                canFinishAudio={!!activeState?.audioEndStateId}
+                onRelease={(id) => {
+                  if (simulator.current?.release(id)) {
+                    const next = simulator.current.snapshot();
+                    if (running) applySnapshot(next);
+                    else {
+                      setSnapshot(next);
+                      setSelectedStateId(next.stateId);
+                      setPosition(next.elapsedMs);
+                    }
+                  }
+                }}
+                onAudioFinished={() => {
+                  if (simulator.current?.audioFinished()) {
+                    const next = simulator.current.snapshot();
+                    if (running) applySnapshot(next);
+                    else {
+                      setSnapshot(next);
+                      setSelectedStateId(next.stateId);
+                      setPosition(next.elapsedMs);
+                    }
+                  }
+                }}
                 onDistance={distancePreview}
                 distances={snapshot?.distances ?? {}}
                 distanceResetKey={previewDistanceEpoch.current}
@@ -1204,6 +1248,23 @@ export function App() {
                       />
                     </label>
                   </div>
+                  <label>
+                    During this interval
+                    <select
+                      aria-label="Event output value"
+                      value={event.active === false ? "off" : "on"}
+                      onChange={(e) =>
+                        updateState((next) => {
+                          next.events.find(
+                            (item) => item.id === event.id,
+                          )!.active = e.target.value === "on";
+                        })
+                      }
+                    >
+                      <option value="on">ON</option>
+                      <option value="off">OFF</option>
+                    </select>
+                  </label>
                   <div className="event-summary">
                     <span className="muted">Duration</span>
                     <br />
@@ -1212,8 +1273,9 @@ export function App() {
                       seconds
                     </strong>
                     <p className="hint">
-                      The output is active during this interval. Events on the
-                      same output must not overlap.
+                      The output is {event.active === false ? "OFF" : "ON"}{" "}
+                      during this interval, then returns to its idle value.
+                      Events on the same output must not overlap.
                     </p>
                   </div>
                   <button
@@ -1298,6 +1360,9 @@ export function App() {
                         next.states.find(
                           (item) => item.id === state.id,
                         )!.foregroundTrack = null;
+                        next.states.find(
+                          (item) => item.id === state.id,
+                        )!.audioEndStateId = null;
                       })
                     }
                   />
@@ -1372,6 +1437,32 @@ export function App() {
                   </>
                 )}
               </div>
+              {state.id !== project.initialStateId && (
+                <label>
+                  When foreground audio finishes
+                  <select
+                    aria-label="Audio finished target"
+                    value={state.audioEndStateId ?? ""}
+                    onChange={(event) =>
+                      updateState((next) => {
+                        next.audioEndStateId = event.target.value || null;
+                      })
+                    }
+                  >
+                    <option value="">Keep this state</option>
+                    {project.states.map((target) => (
+                      <option value={target.id} key={target.id}>
+                        {target.name}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="hint">
+                    Requires BUSY feedback on every player and a non-looping
+                    foreground track. Preview uses the linked track length or
+                    the Finish audio button.
+                  </span>
+                </label>
+              )}
               <div className="divider" />
               <div className="inspector-section">
                 <div className="row between">
@@ -1382,7 +1473,7 @@ export function App() {
                   <div className="transition-row" key={`${state.id}-${index}`}>
                     <div className="row">
                       <label className="grow">
-                        When triggered
+                        Input
                         <select
                           aria-label={`Transition ${index + 1} trigger`}
                           value={transition.triggerId}
@@ -1390,6 +1481,14 @@ export function App() {
                             updateState((next) => {
                               next.transitions[index].triggerId =
                                 e.target.value;
+                              const trigger = project.triggers.find(
+                                (item) => item.id === e.target.value,
+                              );
+                              if (
+                                trigger?.kind === "timer" ||
+                                (trigger && isZonedTrigger(trigger))
+                              )
+                                next.transitions[index].edge = "activate";
                             })
                           }
                         >
@@ -1421,6 +1520,32 @@ export function App() {
                         <Trash2 size={13} />
                       </button>
                     </div>
+                    <label>
+                      Respond on
+                      <select
+                        aria-label={`Transition ${index + 1} edge`}
+                        value={transition.edge ?? "activate"}
+                        onChange={(event) =>
+                          updateState((next) => {
+                            next.transitions[index].edge = event.target
+                              .value as "activate" | "release";
+                          })
+                        }
+                      >
+                        <option value="activate">Activation</option>
+                        <option
+                          value="release"
+                          disabled={project.triggers.some(
+                            (trigger) =>
+                              trigger.id === transition.triggerId &&
+                              (trigger.kind === "timer" ||
+                                isZonedTrigger(trigger)),
+                          )}
+                        >
+                          Release
+                        </option>
+                      </select>
+                    </label>
                     <div className="row">
                       <ArrowRight size={14} className="muted" />
                       <select
@@ -1430,6 +1555,10 @@ export function App() {
                           updateState((next) => {
                             next.transitions[index].targetStateId =
                               e.target.value;
+                            next.transitions[index].alternateStateIds =
+                              next.transitions[index].alternateStateIds?.filter(
+                                (id) => id !== e.target.value,
+                              );
                           })
                         }
                       >
@@ -1440,6 +1569,73 @@ export function App() {
                         ))}
                       </select>
                     </div>
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        aria-label={`Transition ${index + 1} cycle variants`}
+                        checked={!!transition.alternateStateIds}
+                        onChange={(event) =>
+                          updateState((next) => {
+                            if (event.target.checked)
+                              next.transitions[index].alternateStateIds = [];
+                            else
+                              delete next.transitions[index].alternateStateIds;
+                          })
+                        }
+                      />
+                      Cycle through scene variants
+                    </label>
+                    {transition.alternateStateIds && (
+                      <div className="transition-targets">
+                        <span className="hint">
+                          Starts with the target above, then these states in the
+                          order selected. Arm / reset starts over.
+                        </span>
+                        {project.states
+                          .filter(
+                            (target) => target.id !== transition.targetStateId,
+                          )
+                          .map((target) => (
+                            <label className="check" key={target.id}>
+                              <input
+                                aria-label={`Transition ${index + 1} variant ${target.name}`}
+                                type="checkbox"
+                                checked={transition.alternateStateIds!.includes(
+                                  target.id,
+                                )}
+                                onChange={(event) =>
+                                  updateState((next) => {
+                                    const t = next.transitions[index];
+                                    t.alternateStateIds = event.target.checked
+                                      ? [
+                                          ...(t.alternateStateIds ?? []),
+                                          target.id,
+                                        ]
+                                      : t.alternateStateIds?.filter(
+                                          (id) => id !== target.id,
+                                        );
+                                  })
+                                }
+                              />
+                              {target.name}
+                            </label>
+                          ))}
+                        <span className="hint">
+                          Order:{" "}
+                          {[
+                            transition.targetStateId,
+                            ...transition.alternateStateIds,
+                          ]
+                            .map(
+                              (id) =>
+                                project.states.find(
+                                  (target) => target.id === id,
+                                )?.name,
+                            )
+                            .join(" → ")}
+                        </span>
+                      </div>
+                    )}
                     {project.triggers.some(
                       (trigger) =>
                         trigger.id === transition.triggerId &&
@@ -1459,9 +1655,17 @@ export function App() {
                     !project.triggers.some(
                       (trigger) =>
                         !isZonedTrigger(trigger) &&
-                        !state.transitions.some(
-                          (t) => t.triggerId === trigger.id,
-                        ),
+                        (!state.transitions.some(
+                          (t) =>
+                            t.triggerId === trigger.id &&
+                            (t.edge ?? "activate") === "activate",
+                        ) ||
+                          (trigger.kind !== "timer" &&
+                            !state.transitions.some(
+                              (t) =>
+                                t.triggerId === trigger.id &&
+                                t.edge === "release",
+                            ))),
                     )
                   }
                   onClick={() =>
@@ -1469,14 +1673,29 @@ export function App() {
                       const available = project.triggers.find(
                         (trigger) =>
                           !isZonedTrigger(trigger) &&
-                          !next.transitions.some(
-                            (t) => t.triggerId === trigger.id,
-                          ),
+                          (!next.transitions.some(
+                            (t) =>
+                              t.triggerId === trigger.id &&
+                              (t.edge ?? "activate") === "activate",
+                          ) ||
+                            (trigger.kind !== "timer" &&
+                              !next.transitions.some(
+                                (t) =>
+                                  t.triggerId === trigger.id &&
+                                  t.edge === "release",
+                              ))),
                       );
                       if (available)
                         next.transitions.push({
                           triggerId: available.id,
                           targetStateId: project.initialStateId,
+                          edge: next.transitions.some(
+                            (t) =>
+                              t.triggerId === available.id &&
+                              (t.edge ?? "activate") === "activate",
+                          )
+                            ? "release"
+                            : "activate",
                         });
                     })
                   }
@@ -1507,9 +1726,28 @@ export function App() {
                             (item) => item.id !== state.id,
                           );
                           next.states.forEach((item) => {
-                            item.transitions = item.transitions.filter(
-                              (t) => t.targetStateId !== state.id,
+                            item.transitions = item.transitions.flatMap(
+                              (transition) => {
+                                const ids = [
+                                  transition.targetStateId,
+                                  ...(transition.alternateStateIds ?? []),
+                                ].filter((id) => id !== state.id);
+                                return ids.length
+                                  ? [
+                                      {
+                                        ...transition,
+                                        targetStateId: ids[0],
+                                        alternateStateIds:
+                                          transition.alternateStateIds
+                                            ? ids.slice(1)
+                                            : undefined,
+                                      },
+                                    ]
+                                  : [];
+                              },
                             );
+                            if (item.audioEndStateId === state.id)
+                              item.audioEndStateId = null;
                           });
                           next.triggers.forEach((trigger) =>
                             trigger.zones?.forEach((zone) => {
@@ -1589,6 +1827,7 @@ export function App() {
       </main>
       <DevicePanel
         project={project}
+        workspaceKey={`${projectEpoch}:${tab}`}
         bytes={Array.from(compiled.bytes)}
         valid={!errors.length && compiled.bytes.length > 0}
         notify={notify}
@@ -1646,6 +1885,22 @@ export function App() {
             </div>
           </div>
         </div>
+      )}
+      {recording && (
+        <PerformanceRecorder
+          project={project}
+          state={state}
+          audio={audio.current}
+          onClose={() => setRecording(false)}
+          onApply={(events) => {
+            updateState((next) => {
+              next.events = events;
+            });
+            setRecording(false);
+            setSelectedEventId(null);
+            notify("Recording applied. Undo restores the previous timeline.");
+          }}
+        />
       )}
       <input
         hidden

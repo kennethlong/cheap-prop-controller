@@ -218,8 +218,55 @@ const denseImage = compileProject(dense);
 if (!denseImage.bytes.length)
   throw new Error(JSON.stringify(denseImage.issues));
 await writeFile("artifacts/scenes/uno-dense.bin", denseImage.bytes);
+const controls = synchronizeAudioPlayers(structuredClone(ambientMix));
+controls.name = "Scene controls with two MP3 players";
+controls.audio.players.forEach((player) => {
+  player.feedback = { pin: null, activeLow: true };
+});
+controls.audio.players[1].kind = "yx5300";
+Object.assign(controls.triggers[2], {
+  kind: "timer",
+  name: "Automatic scene",
+  timerIntervalMs: 30000,
+  timerResetOnTrigger: true,
+});
+controls.outputs[0].idleActive = true;
+controls.states[1].events[0].active = false;
+controls.states[0].transitions = [
+  {
+    triggerId: "approach",
+    targetStateId: "approach",
+    alternateStateIds: ["scare"],
+  },
+  {
+    triggerId: "reset",
+    targetStateId: "approach",
+    alternateStateIds: ["scare"],
+  },
+];
+controls.states[1].transitions = [
+  { triggerId: "scare", targetStateId: "scare" },
+  { triggerId: "approach", edge: "release", targetStateId: "idle" },
+];
+controls.states[2].transitions = [
+  { triggerId: "scare", edge: "release", targetStateId: "idle" },
+];
+controls.states[2].audioEndStateId = "idle";
+const allocatedControls = allocatePins(controls).project;
+for (const board of ["uno", "nano", "mega", "pro-mini"] as BoardId[]) {
+  const project = allocatePins({ ...controls, board }).project;
+  const compiled = compileProject(project);
+  if (!compiled.bytes.length) throw new Error(JSON.stringify(compiled.issues));
+  await writeFile(`artifacts/scenes/${board}-controls.bin`, compiled.bytes);
+  if (process.argv.includes("--golden"))
+    await writeFile(`tests/core/${board}-controls-scene.bin`, compiled.bytes);
+}
 if (process.argv.includes("--examples")) {
   await mkdir("examples", { recursive: true });
+  await writeFile(
+    "examples/scene-controls-uno.cpc.json",
+    JSON.stringify(allocatedControls, null, 2) + "\n",
+  );
   await writeFile(
     "examples/ir-learning-starter.cpc.json",
     JSON.stringify(allocatedIrTraining, null, 2) + "\n",

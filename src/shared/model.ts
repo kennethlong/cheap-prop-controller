@@ -1,6 +1,6 @@
 export type BoardId = "uno" | "nano" | "pro-mini" | "mega";
 export type WiringPreset = "custom" | "relay-shield";
-export type TriggerKind = "button" | "pir" | "ultrasonic";
+export type TriggerKind = "button" | "pir" | "ultrasonic" | "timer";
 export type PlayerKind = "dfplayer" | "yx5300";
 export type AudioTransitionMode = "cut" | "crossfade" | "fade-through";
 
@@ -70,12 +70,17 @@ export interface TriggerConfig {
   /** Omitted in existing projects: use the original single threshold. */
   distanceMode?: "threshold" | "zones";
   zones?: DistanceZone[];
+  /** Timer triggers use no GPIO and restart on RUN/RESET. */
+  timerIntervalMs?: number;
+  timerResetOnTrigger?: boolean;
 }
 export interface AudioPlayer {
   id: string;
   kind: PlayerKind;
   txPin: number | null;
   rxPin: number | null;
+  /** Optional active-low/high BUSY wire; not a UART acknowledgement. */
+  feedback?: { pin: number | null; activeLow: boolean };
 }
 export interface MediaTrack {
   number: number;
@@ -94,10 +99,15 @@ export interface TimelineEvent {
   outputId: string;
   startMs: number;
   endMs: number;
+  /** Omitted means ON. OFF overrides idleActive for this interval. */
+  active?: boolean;
 }
 export interface StateTransition {
   triggerId: string;
   targetStateId: string;
+  edge?: "activate" | "release";
+  /** Additional destinations, cycled after targetStateId; resets on RUN/RESET. */
+  alternateStateIds?: string[];
 }
 export interface SceneState {
   id: string;
@@ -110,6 +120,8 @@ export interface SceneState {
   events: TimelineEvent[];
   irEvents?: IrTimelineEvent[];
   transitions: StateTransition[];
+  /** Optional transition after confirmed nonlooping foreground completion. */
+  audioEndStateId?: string | null;
 }
 export interface SceneProject {
   version: 1;
@@ -150,6 +162,7 @@ export const LIMITS = {
   irCommands: 32,
   irEvents: 128,
   irPulses: 127,
+  expandedTransitions: 128,
 } as const;
 
 export function isZonedTrigger(trigger: TriggerConfig): boolean {

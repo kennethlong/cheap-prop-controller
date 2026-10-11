@@ -1,0 +1,32 @@
+{
+  "release": {"app":"0.7.0","firmware":"0.6.0"},
+  "scope":"Manual output tests, optional per-player BUSY feedback, live recording/overdub, timer inputs, activation/release and round-robin transitions, ON/OFF intervals. Existing onboard storage and looping ambient remain; no external memory or long-recording work.",
+  "json": {
+    "event":"TimelineEvent.active?:boolean; omitted/true=ON, false=OFF during interval; revert to output idleActive outside intervals. Overlaps on same lane remain invalid.",
+    "timer":"TriggerConfig.kind=timer, timerIntervalMs?:number default30000 (50..3276750, multiple50), timerResetOnTrigger?:boolean defaultfalse. pin/echoPin=null; no GPIO. Existing inactive physical settings retained but not compiled.",
+    "transition":"StateTransition.edge?:activate|release defaultactivate; alternateStateIds?:string[] extra destinations after targetStateId, distinct existing IDs. Round robin only. One JSON transition per trigger+edge; compiler expands destinations as contiguous repeated wire records. At most128 expanded transitions total,16 logical per state. Timer/zoned inputs cannot use release; zones keep their actions.",
+    "feedback":"AudioPlayer.feedback?:{pin:number|null,activeLow:boolean}; absence=disabled. Allocate a feedback pin after audio pairs, before triggers/outputs. Nano/ProMini analog-only A6/A7 (IDs20/21) are preferred when exposed; otherwise ordinary GPIO. Uno/Mega ordinary GPIO. Allocation must claim once and show GPIO budget correctly.",
+    "audioEnd":"SceneState.audioEndStateId?:string|null; nonnull requires noninitial state with nonlooping foreground and feedback on ALL configured players. Real end requires PLAY transmitted, debounced BUSY active then inactive. No BUSY within5s=failed start, never complete; fresh PLAY/state/STOP clear stale completion. Ambient/retiring voices ignored. Preview can infer known nonlooping source length and provide explicit simulator finish injection."
+  },
+  "binary": {
+    "version":"Keep JSON version1. Compile CPC1 exactly as before when no advanced feature. Any false event.active, timer, release edge, nonempty alternateStateIds, feedback, or audioEndStateId uses magic CPC2. All record sizes/layouts and ZN v1/v2 extensions stay unchanged. Firmware accepts both; extended fields below require CPC2. Desktop requires sceneControls:true BEFORE BEGIN for CPC2. CRC coverage unchanged; upload virtual magic and magic-last commit must preserve byte3 version.",
+    "event":"6B byte5=0 ON /1 OFF",
+    "player":"4B byte3=0 disabled, else (busyPin+1) | (activeLow?0:128); pin range2..69 or20/21 analog-only Nano/ProMini. D0/D1 forbidden. Disabled remainszero.",
+    "timer":"8B kind3; pin/echo255; flagsbyte3 bit0=resetOnExternal; u16byte4=intervalTicks; byte6/7=0. Other trigger records unchanged.",
+    "transition":"2B byte0 lower3 triggerIndex,bit7 release,other bitszero. Byte1 destination. Round robin is contiguous repeated samekey (trigger+edge) records with unique targets. Group ordering follows JSON; first matching group wins. Cursor per state/key persists through state entry and resets on RUN/RESET. Norandomization.",
+    "state":"16B byte13=audioEndTargetIndex+1,0 none;14/15zero. Existing flags unchanged.",
+    "limits":"128 expanded transitions total; up to16 logical groups per state, each <=8 distinct target states. Old images byte-for-byte unchanged."
+  },
+  "runtime": {
+    "timer":"All timers start on RUN/RESET; independent of state entry. Repeat once per elapsed interval; skip catch-up bursts. Reset-enabled timers reset on any physical activation edge, confirmed zone entry (not baseline), or serial TRIGGER. Release and timer events do not reset other timers. Reset wins over timer expiration at same tick. STOP halts timers.",
+    "priority":"Ordered transition groups match combined physical activation/release and due timer masks; first matching group wins as legacy. Then zone exit/enter actions. Audio-finished transition last only if no earlier state entry this pass. Same-state restart counts as state entry. Debounced release only after input was observed inactive, then active; held-at-boot input must not emit phantomrelease."
+  },
+  "serial": {
+    "capabilities":"HELLO/STATUS advertise sceneControls:true,outputTest:true,audioFeedback:true; protocol remains1. STATUS testingOutputs:boolean and players:[{index,feedback:disabled|starting|playing|finished|failed|stopped,busy:boolean|null}]. BUSY reflects physical input, not proof of correct track/content.",
+    "begin":"TESTBEGIN length crc validates uploaded scene matches provided compiled image length/CRC BEFORE stopping. Enters disarmed test mode, stops audio/IR, zeros outputs. No EEPROMwrites. Reject while upload/IRtraining active.",
+    "set":"TEST mask (unsigned32) replaces complete logical outputmask, validates no out-of-range bits and active test mode, renews1500ms lease. Mask0=Alloff, remains testmode. App sends every500ms whiletestmode; no seriallogs/STATUSpoll required for heartbeat.",
+    "stop":"STOP exits testmode immediately, clears all outputs/audio/IR, stays stopped. Lease expiry does same. Reject RUN/RESET/TRIGGER, IRlearning/testing, sceneupload while testmode; user exits first. Disconnect closes with best-effort STOP; watchdog covers crash/unplug. Foreground/window blur, leavingpanel, projectreplacement stop testmode. UI holds edit/device conflicts during testmode.",
+    "api":"beginOutputTest(bytes:number[]):Promise<DeviceReply>; setTestOutputs(mask:number):Promise<DeviceReply>; endOutputTest():Promise<DeviceReply> prioritySTOP. Existing deviceCommand STATUS used for normal monitoring. Testbegin requires firmware capability+matching board+valid scene envelope and device verifies length/CRC. Service prevents queued stale mask writes after STOP/disconnect using generation."
+  },
+  "recording":"Desktop-only selected state onepass; no physicaloutputs. Arm lanes and ON/OFF per lane, held keyboard/pointercontrols quantized50ms, clamp duration and minimum50ms tap. Release on blur/end; recordaudio onlyselectedstate with transitions suppressed. Review Apply/Discard; Overdub overlays captured intervals splitting previous conflicts and merging adjacent samevalue; Replace removes existing intervals only on armedlanes. Preserve otherlanes/IR/stateconfig. Apply one undo entry. No project edits during capture. Pure helpers quantizeRecordedInterval/applyRecording owned by simulator worker."
+}

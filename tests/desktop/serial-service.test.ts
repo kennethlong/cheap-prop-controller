@@ -94,6 +94,231 @@ const irCommand = (raw = false): IrCommand => ({
   gapMs: 150,
 });
 
+describe("manual output testing", () => {
+  it("tries STOP before disconnecting a live test session", async () => {
+    const { service, port } = await connected();
+    port.onWrite = (command) => {
+      if (command === "HELLO") port.reply({ ...hello, outputTest: true });
+      else port.reply({ type: "ack", command: command.split(" ")[0] });
+    };
+    const begin = service.beginOutputTest(scene());
+    await flush();
+    await begin;
+    const disconnect = service.disconnect();
+    await flush();
+    await disconnect;
+    expect(port.writes.at(-1)).toBe("STOP");
+    expect(port.isOpen).toBe(false);
+  });
+
+  it("closes a disconnected test device after a bounded STOP attempt", async () => {
+    const { service, port } = await connected();
+    port.onWrite = (command) => {
+      if (command === "HELLO") port.reply({ ...hello, outputTest: true });
+      else if (command.startsWith("TESTBEGIN"))
+        port.reply({ type: "ack", command: "TESTBEGIN" });
+    };
+    const begin = service.beginOutputTest(scene());
+    await flush();
+    await begin;
+    const disconnect = service.disconnect();
+    await flush();
+    expect(port.isOpen).toBe(true);
+    await vi.advanceTimersByTimeAsync(500);
+    await disconnect;
+    expect(port.isOpen).toBe(false);
+  });
+
+  it("preflights capability and board before touching physical outputs", async () => {
+    const { service, port } = await connected();
+    for (const capability of [undefined, false, "true"]) {
+      port.onWrite = () => port.reply({ ...hello, outputTest: capability });
+      const result = failure(service.beginOutputTest(scene()));
+      await flush();
+      expect(String(await result)).toContain("updated firmware");
+    }
+    port.onWrite = () =>
+      port.reply({ ...hello, outputTest: true, board: "mega" });
+    const mismatch = failure(service.beginOutputTest(scene()));
+    await flush();
+    expect(String(await mismatch)).toContain("Project board");
+    expect(port.writes.some((command) => command.startsWith("TESTBEGIN"))).toBe(
+      false,
+    );
+    await service.disconnect();
+  });
+
+  it("binds test mode to the exact uploaded scene and serializes output/heartbeat commands", async () => {
+    const { service, port } = await connected();
+    port.onWrite = (command) => {
+      if (command === "HELLO") port.reply({ ...hello, outputTest: true });
+      else port.reply({ type: "ack", command: command.split(" ")[0] });
+    };
+    const bytes = scene();
+    const testing = service.beginOutputTest(bytes);
+    const on = service.setTestOutputs(0x80000001);
+    const heartbeat = service.setTestOutputs(0x80000001);
+    const off = service.setTestOutputs(0);
+    await flush();
+    await Promise.all([testing, on, heartbeat, off]);
+    expect(port.writes.slice(-4)).toEqual([
+      `TESTBEGIN ${bytes.length} ${bytes[6] | (bytes[7] << 8)}`,
+      "TEST 2147483649",
+      "TEST 2147483649",
+      "TEST 0",
+    ]);
+    expect(port.writes.some((command) => command.startsWith("BEGIN "))).toBe(
+      false,
+    );
+    expect(port.writes).not.toContain("RUN");
+    await service.disconnect();
+  });
+
+  it("rejects malformed images and indices before any serial write", async () => {
+    const { service, port } = await connected();
+    const count = port.writes.length;
+    const bytes = scene();
+    bytes[32] ^= 1;
+    await expect(service.beginOutputTest(bytes)).rejects.toThrow(
+      "Invalid compiled scene",
+    );
+    for (const mask of [-1, 0x100000000, 1.1, NaN, "1"])
+      await expect(service.setTestOutputs(mask as number)).rejects.toThrow(
+        "Invalid output test",
+      );
+    expect(port.writes).toHaveLength(count);
+    await service.disconnect();
+  });
+
+  it("STOP cancels a pending output change and queued heartbeat without later reactivation", async () => {
+    const { service, port } = await connected();
+    port.onWrite = () => {};
+    const changing = failure(service.setTestOutputs(4));
+    const keep = failure(service.setTestOutputs(4));
+    await flush();
+    const stop = service.endOutputTest();
+    await flush();
+    expect(port.writes.at(-1)).toBe("STOP");
+    port.reply({ type: "ack", command: "TEST" });
+    port.reply({ type: "ack", command: "STOP" });
+    await stop;
+    expect(await changing).toBeInstanceOf(Error);
+    expect(await keep).toBeInstanceOf(Error);
+    expect(port.writes.filter((command) => command === "TEST 4")).toHaveLength(
+      1,
+    );
+    await service.disconnect();
+  });
+
+  it("preserves the running scene after an explicit stale-scene rejection", async () => {
+    const { service, port } = await connected();
+    let running = true;
+    port.onWrite = (command) => {
+      if (command === "HELLO") port.reply({ ...hello, outputTest: true });
+      else if (command.startsWith("TESTBEGIN"))
+        port.reply({
+          type: "error",
+          message: "Upload this scene before testing outputs",
+        });
+      else if (command === "STOP") {
+        running = false;
+        port.reply({ type: "ack", command: "STOP" });
+      }
+    };
+    const result = failure(service.beginOutputTest(scene()));
+    await flush();
+    expect(String(await result)).toContain("Upload this scene");
+    expect(port.writes).not.toContain("STOP");
+    expect(running).toBe(true);
+    expect(port.writes).not.toContain("RUN");
+    await service.disconnect();
+    expect(port.writes).not.toContain("STOP");
+  });
+
+  it.each(["timeout", "write error"])(
+    "uses STOP cleanup when TESTBEGIN outcome is uncertain (%s)",
+    async (reason) => {
+      const { service, port } = await connected();
+      port.deferWriteCallbacks = true;
+      port.onWrite = (command) => {
+        if (command === "HELLO") port.reply({ ...hello, outputTest: true });
+        else if (command === "STOP")
+          port.reply({ type: "ack", command: "STOP" });
+      };
+      const result = failure(service.beginOutputTest(scene()));
+      await flush();
+      expect(port.writes.at(-1)).toMatch(/^TESTBEGIN /);
+      if (reason === "timeout") await vi.advanceTimersByTimeAsync(2500);
+      else port.callbacks.at(-1)!(new Error("USB write failed"));
+      await flush();
+      expect(await result).toBeInstanceOf(Error);
+      expect(port.writes.at(-1)).toBe("STOP");
+      port.onWrite = (command) => port.reply({ type: "ack", command });
+      const run = service.command("RUN");
+      await flush();
+      expect(await run).toEqual({ type: "ack", command: "RUN" });
+      await service.disconnect();
+    },
+  );
+
+  it("guards conflicting operations when they execute after a queued test begin", async () => {
+    const { service, port } = await connected();
+    port.onWrite = (command) => {
+      if (command === "HELLO") port.reply({ ...irHello, outputTest: true });
+      else if (command === "STATUS")
+        port.reply({ type: "status", testingOutputs: true });
+      else if (!command.startsWith("TESTBEGIN"))
+        port.reply({ type: "ack", command: command.split(" ")[0] });
+    };
+    const beginning = service.beginOutputTest(scene());
+    const conflicts = [
+      service.command("RUN"),
+      service.command("RESET"),
+      service.command("TRIGGER 0"),
+      service.learnIr(),
+      service.testIr(irCommand()),
+      service.upload(scene()),
+      service.beginOutputTest(scene()),
+      service.connect("OTHER"),
+    ].map((promise) => failure<unknown>(promise));
+    const mask = service.setTestOutputs(1);
+    const status = service.command("STATUS");
+    const greeting = service.command("HELLO");
+    await flush();
+    expect(port.writes.at(-1)).toMatch(/^TESTBEGIN /);
+    port.reply({ type: "ack", command: "TESTBEGIN" });
+    await flush();
+    await beginning;
+    for (const result of await Promise.all(conflicts))
+      expect(String(result)).toContain("Send STOP to exit output test");
+    expect(await mask).toEqual({ type: "ack", command: "TEST" });
+    expect(await status).toMatchObject({ type: "status" });
+    expect(await greeting).toMatchObject({ type: "hello" });
+    expect(port.writes.slice(-3)).toEqual(["TEST 1", "STATUS", "HELLO"]);
+    expect(
+      port.writes.some((command) =>
+        /^(RUN|RESET|TRIGGER|IRLEARN|IRBEGIN|BEGIN|STOP)( |$)/.test(command),
+      ),
+    ).toBe(false);
+    expect(port.isOpen).toBe(true);
+    expect(mock.ports).toHaveLength(1);
+    const stop = service.endOutputTest();
+    await flush();
+    await stop;
+    const run = service.command("RUN");
+    await flush();
+    expect(await run).toEqual({ type: "ack", command: "RUN" });
+    port.onWrite = (command) => {
+      if (command === "HELLO") port.reply({ ...hello, outputTest: true });
+      else port.reply({ type: "ack", command: command.split(" ")[0] });
+    };
+    const restarted = service.beginOutputTest(scene());
+    await flush();
+    expect(await restarted).toEqual({ type: "ack", command: "TESTBEGIN" });
+    await service.disconnect();
+  });
+});
+
 describe("IR learning and RAM tests", () => {
   it("reports the current connection and capability snapshot without serial traffic", async () => {
     const { service, port } = await connected();
@@ -498,6 +723,39 @@ afterEach(() => {
 });
 
 describe("serial upload and priority controls", () => {
+  it.each([undefined, false, "true"])(
+    "requires explicit CPC2 scene-controls support before changing saved storage (%s)",
+    async (capability) => {
+      const { service, port } = await connected();
+      const project = createDefaultProject();
+      project.states[1].events[0].active = false;
+      const values = [...compileProject(project).bytes];
+      expect(String.fromCharCode(...values.slice(0, 4))).toBe("CPC2");
+      port.onWrite = () => port.reply({ ...hello, sceneControls: capability });
+      const rejected = failure(service.upload(values));
+      await flush();
+      expect(String(await rejected)).toContain("advanced scene controls");
+      expect(port.writes.some((command) => command.startsWith("BEGIN "))).toBe(
+        false,
+      );
+      port.onWrite = (command) => {
+        if (command === "HELLO") port.reply({ ...hello, sceneControls: true });
+        else if (command.startsWith("DATA ")) {
+          const [, offset, data] = command.split(" ");
+          port.reply({
+            type: "ack",
+            command: "DATA",
+            offset: Number(offset) + data.length / 2,
+          });
+        } else port.reply({ type: "ack", command: command.split(" ")[0] });
+      };
+      const upload = service.upload(values);
+      await flush();
+      expect(await upload).toEqual({ type: "ack", command: "COMMIT" });
+      await service.disconnect();
+    },
+  );
+
   it.each([undefined, false, "true"])(
     "requires ambient mixing capability before modifying controller storage (%s)",
     async (capability) => {

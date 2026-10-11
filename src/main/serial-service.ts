@@ -16,6 +16,8 @@ type Waiter = {
   timer: ReturnType<typeof setTimeout>;
   ignoreUnscopedErrors: boolean;
 };
+/** A parsed controller refusal, distinct from an uncertain transport failure. */
+class ControllerRejectionError extends Error {}
 export class SerialService extends EventEmitter {
   private port?: SerialPort;
   private buffer = "";
@@ -23,6 +25,7 @@ export class SerialService extends EventEmitter {
   private tail: Promise<unknown> = Promise.resolve();
   private controlTail: Promise<unknown> = Promise.resolve();
   private generation = 0;
+  private outputTestRequested = false;
   hello?: DeviceReply;
 
   get path() {
@@ -39,6 +42,10 @@ export class SerialService extends EventEmitter {
   private ensureCurrent(generation: number) {
     if (generation !== this.generation)
       throw new Error("Operation cancelled by STOP or disconnect");
+  }
+  private requireOutputTestStopped() {
+    if (this.outputTestRequested)
+      throw new Error("Send STOP to exit output test before this operation.");
   }
   private exclusive<T>(work: (generation: number) => Promise<T>): Promise<T> {
     const generation = this.generation;
@@ -96,7 +103,9 @@ export class SerialService extends EventEmitter {
           clearTimeout(waiter.timer);
           if (reply.type === "error")
             waiter.reject(
-              new Error(String(reply.message ?? "Controller rejected command")),
+              new ControllerRejectionError(
+                String(reply.message ?? "Controller rejected command"),
+              ),
             );
           else waiter.resolve(reply);
         }
@@ -118,15 +127,26 @@ export class SerialService extends EventEmitter {
     this.port = undefined;
     this.hello = undefined;
     this.buffer = "";
+    this.outputTestRequested = false;
     if (port?.isOpen)
       await new Promise<void>((resolve) => port.close(() => resolve()));
     this.emit("status", { connected: false });
   }
   disconnect() {
-    return this.priority(() => this.close());
+    return this.priority(async () => {
+      if (this.outputTestRequested && this.port?.isOpen) {
+        try {
+          await this.request("STOP", 500, true);
+        } catch {
+          // The controller's 1500 ms lease also covers an unplugged device.
+        }
+      }
+      await this.close();
+    });
   }
   connect(path: string): Promise<DeviceReply> {
     return this.exclusive(async (generation) => {
+      this.requireOutputTestStopped();
       if (typeof path !== "string" || !path || path.length > 256)
         throw new Error("Choose a serial port");
       await this.close();
@@ -146,6 +166,7 @@ export class SerialService extends EventEmitter {
         if (this.port === port) {
           this.port = undefined;
           this.hello = undefined;
+          this.outputTestRequested = false;
           this.fail(new Error("USB connection closed"));
           this.emit("status", { connected: false });
         }
@@ -215,11 +236,76 @@ export class SerialService extends EventEmitter {
       return Promise.reject(new Error("Unsupported controller command"));
     // An abandoned DATA/STATUS reply can arrive first. It cannot satisfy STOP;
     // old firmware error frames lack command IDs, so wait for STOP's own ACK.
-    if (command === "STOP")
+    if (command === "STOP") {
+      this.outputTestRequested = false;
       return this.priority(() => this.request("STOP", 2500, true));
-    return this.exclusive(() => this.request(command));
+    }
+    return this.exclusive(() => {
+      if (command !== "HELLO" && command !== "STATUS")
+        this.requireOutputTestStopped();
+      return this.request(command);
+    });
   }
   cancelIr(): Promise<DeviceReply> {
+    return this.command("STOP");
+  }
+  beginOutputTest(expectedScene: number[]): Promise<DeviceReply> {
+    return this.exclusive(async (generation) => {
+      this.requireOutputTestStopped();
+      if (
+        !Array.isArray(expectedScene) ||
+        expectedScene.length < 32 ||
+        expectedScene.length > 4096 ||
+        expectedScene.some(
+          (value) => !Number.isInteger(value) || value < 0 || value > 255,
+        )
+      )
+        throw new Error("Invalid compiled scene");
+      const bytes = Buffer.from(expectedScene);
+      if (
+        !/^CPC[12]$/.test(bytes.toString("ascii", 0, 4)) ||
+        bytes.readUInt16LE(4) !== bytes.length ||
+        !verifySceneChecksum(bytes)
+      )
+        throw new Error("Invalid compiled scene");
+      const hello = await this.request("HELLO");
+      this.ensureCurrent(generation);
+      if (hello.protocol !== 1 || hello.outputTest !== true)
+        throw new Error(
+          "Install the updated firmware to test individual outputs.",
+        );
+      const boardIds: Record<string, number> = {
+        uno: 1,
+        nano: 2,
+        "pro-mini": 3,
+        mega: 4,
+      };
+      if (boardIds[String(hello.board)] !== bytes[8])
+        throw new Error("Project board does not match connected firmware.");
+      try {
+        this.outputTestRequested = true;
+        const result = await this.request(
+          `TESTBEGIN ${bytes.length} ${bytes.readUInt16LE(6)}`,
+        );
+        this.ensureCurrent(generation);
+        return result;
+      } catch (error) {
+        // Firmware checks scene identity before stopping anything. An explicit
+        // refusal leaves that running scene intact; only an uncertain outcome
+        // needs STOP in case TESTBEGIN reached the controller without its ACK.
+        if (!(error instanceof ControllerRejectionError))
+          await this.cleanupIr(generation);
+        if (generation === this.generation) this.outputTestRequested = false;
+        throw error;
+      }
+    });
+  }
+  setTestOutputs(mask: number): Promise<DeviceReply> {
+    if (!Number.isInteger(mask) || mask < 0 || mask > 0xffffffff)
+      return Promise.reject(new Error("Invalid output test control"));
+    return this.exclusive(() => this.request(`TEST ${mask}`));
+  }
+  endOutputTest(): Promise<DeviceReply> {
     return this.command("STOP");
   }
   private async requireIrCapability(
@@ -244,6 +330,7 @@ export class SerialService extends EventEmitter {
   }
   learnIr(): Promise<IrSignal> {
     return this.exclusive(async (generation) => {
+      this.requireOutputTestStopped();
       await this.requireIrCapability("irLearning", generation);
       try {
         const capture = await this.request("IRLEARN", 16000);
@@ -262,6 +349,7 @@ export class SerialService extends EventEmitter {
   }
   testIr(command: IrCommand): Promise<DeviceReply> {
     return this.exclusive(async (generation) => {
+      this.requireOutputTestStopped();
       if (!validateIrCommand(command)) throw new Error("Invalid IR command");
       const signal = command.signal;
       let payload = Buffer.alloc(0);
@@ -295,6 +383,7 @@ export class SerialService extends EventEmitter {
   }
   upload(values: number[]): Promise<DeviceReply> {
     return this.exclusive(async (generation) => {
+      this.requireOutputTestStopped();
       if (
         !Array.isArray(values) ||
         values.length < 32 ||
@@ -306,7 +395,7 @@ export class SerialService extends EventEmitter {
         throw new Error("Invalid compiled scene");
       const bytes = Buffer.from(values);
       if (
-        bytes.toString("ascii", 0, 4) !== "CPC1" ||
+        !/^CPC[12]$/.test(bytes.toString("ascii", 0, 4)) ||
         bytes.readUInt16LE(4) !== bytes.length
       )
         throw new Error("Invalid scene image header");
@@ -316,6 +405,10 @@ export class SerialService extends EventEmitter {
       this.ensureCurrent(generation);
       if (hello.type !== "hello" || hello.protocol !== 1)
         throw new Error("Incompatible controller firmware");
+      if (bytes[3] === 0x32 && hello.sceneControls !== true)
+        throw new Error(
+          "Install the updated firmware to use advanced scene controls. The saved controller scene has not been changed.",
+        );
       const boardIds: Record<string, number> = {
         uno: 1,
         nano: 2,

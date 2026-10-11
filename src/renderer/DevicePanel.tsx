@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronUp,
@@ -10,7 +10,7 @@ import {
   Unplug,
   Upload,
 } from "lucide-react";
-import type { PortInfo } from "../desktop-api";
+import type { DeviceReply, PortInfo } from "../desktop-api";
 import type { SceneProject } from "../shared/model";
 import { BOARD_PROFILES } from "../shared/boards";
 import { useDevice } from "./DeviceContext";
@@ -19,10 +19,17 @@ interface Props {
   project: SceneProject;
   bytes: number[];
   valid: boolean;
+  workspaceKey: string;
   notify(message: string, error?: boolean): void;
 }
 
-export function DevicePanel({ project, bytes, valid, notify }: Props) {
+export function DevicePanel({
+  project,
+  bytes,
+  valid,
+  workspaceKey,
+  notify,
+}: Props) {
   const [ports, setPorts] = useState<PortInfo[]>([]);
   const [port, setPort] = useState("");
   const { status, setStatus, busy, run } = useDevice();
@@ -30,6 +37,19 @@ export function DevicePanel({ project, bytes, valid, notify }: Props) {
   const [logs, setLogs] = useState<string[]>([]);
   const [showLogs, setShowLogs] = useState(false);
   const [showFlash, setShowFlash] = useState(false);
+  const [showTests, setShowTests] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testMask, setTestMask] = useState(0);
+  const [feedback, setFeedback] = useState<DeviceReply | null>(null);
+  const testActive = useRef(false);
+  const testPending = useRef(false);
+  const desiredMask = useRef(0);
+  const releaseTest = useRef<(() => void) | null>(null);
+  const testEpoch = useRef(0);
+  const sendingMask = useRef(false);
+  const latched = useRef(0);
+  const heldMask = useRef(0);
+  const heldSources = useRef(new Map<number, Set<string>>());
   const [variant, setVariant] = useState<"default" | "old-bootloader">(
     "default",
   );
@@ -74,16 +94,156 @@ export function DevicePanel({ project, bytes, valid, notify }: Props) {
   };
   const command = (value: string) =>
     action(value, async () => {
+      if (value === "STOP") resetTest();
       const result =
         value === "STOP"
           ? await window.cpc!.cancelIr()
           : await window.cpc!.deviceCommand(value);
+      if (value === "STATUS") setFeedback(result);
       addLog(`${value} → ${JSON.stringify(result)}`);
       if (result.type === "error")
         throw new Error(
           String(result.message ?? result.error ?? "Device rejected command"),
         );
     });
+  const resetTest = () => {
+    testEpoch.current++;
+    testActive.current = false;
+    testPending.current = false;
+    desiredMask.current = 0;
+    latched.current = 0;
+    heldMask.current = 0;
+    heldSources.current.clear();
+    setTesting(false);
+    setTestMask(0);
+    releaseTest.current?.();
+    releaseTest.current = null;
+  };
+  const stopTests = async () => {
+    const wasTesting = testActive.current || testPending.current;
+    resetTest();
+    if (wasTesting && window.cpc)
+      await action("STOP", () => window.cpc!.endOutputTest());
+  };
+  const sendMask = async () => {
+    if (!testActive.current || sendingMask.current || !window.cpc) return;
+    const epoch = testEpoch.current;
+    const mask = desiredMask.current;
+    sendingMask.current = true;
+    try {
+      await window.cpc.setTestOutputs(mask);
+    } catch (error) {
+      if (testEpoch.current === epoch) {
+        notify(`Output test stopped: ${String(error)}`, true);
+        await stopTests();
+      }
+    } finally {
+      sendingMask.current = false;
+      if (
+        epoch === testEpoch.current &&
+        testActive.current &&
+        desiredMask.current !== mask
+      )
+        void sendMask();
+    }
+  };
+  const setMask = () => {
+    desiredMask.current = (latched.current | heldMask.current) >>> 0;
+    setTestMask(desiredMask.current);
+    void sendMask();
+  };
+  const holdOutput = (index: number, source: string, active: boolean) => {
+    if (active && !testActive.current) return;
+    const sources = heldSources.current.get(index) ?? new Set<string>();
+    if (active) sources.add(source);
+    else sources.delete(source);
+    if (sources.size) heldSources.current.set(index, sources);
+    else heldSources.current.delete(index);
+    heldMask.current =
+      [...heldSources.current.keys()].reduce(
+        (mask, item) => mask | (1 << item),
+        0,
+      ) >>> 0;
+    setMask();
+  };
+  const beginTests = () => {
+    if (testPending.current || testActive.current) return;
+    const epoch = ++testEpoch.current;
+    testPending.current = true;
+    void action("Testing outputs", async () => {
+      try {
+        await window.cpc!.beginOutputTest(bytes);
+        if (epoch !== testEpoch.current) return;
+        testPending.current = false;
+        testActive.current = true;
+        setTesting(true);
+        setFeedback(null);
+        await new Promise<void>((resolve) => {
+          releaseTest.current = resolve;
+        });
+      } finally {
+        if (epoch === testEpoch.current) resetTest();
+      }
+    });
+  };
+  useEffect(() => {
+    const timer = window.setInterval(() => void sendMask(), 500);
+    const blur = () => void stopTests();
+    const hidden = () => {
+      if (document.hidden) void stopTests();
+    };
+    window.addEventListener("blur", blur);
+    document.addEventListener("visibilitychange", hidden);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("blur", blur);
+      document.removeEventListener("visibilitychange", hidden);
+    };
+  }, []);
+  useEffect(() => {
+    void stopTests();
+  }, [workspaceKey, bytes.join(","), connected]);
+  useEffect(() => {
+    if (
+      !showLogs ||
+      !connected ||
+      busy ||
+      status.hello?.audioFeedback !== true ||
+      !window.cpc
+    )
+      return;
+    let current = true;
+    let pending = false;
+    const poll = async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        const reply = await window.cpc!.deviceCommand("STATUS");
+        if (current) setFeedback(reply);
+      } catch {
+        /* Connection and command errors remain in the device console. */
+      } finally {
+        pending = false;
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 1000);
+    return () => {
+      current = false;
+      clearInterval(timer);
+    };
+  }, [showLogs, connected, busy, status.hello?.audioFeedback]);
+  useEffect(
+    () => () => {
+      const active = testActive.current || testPending.current;
+      testActive.current = false;
+      testPending.current = false;
+      testEpoch.current++;
+      releaseTest.current?.();
+      if (active && window.cpc) void window.cpc.endOutputTest().catch(() => {});
+    },
+    [],
+  );
   return (
     <section className="device-panel" aria-label="Physical controller">
       <div className="device-toolbar">
@@ -188,6 +348,16 @@ export function DevicePanel({ project, bytes, valid, notify }: Props) {
               <Download size={14} />
               Firmware
             </button>
+            <button
+              className={showTests ? "selected" : "ghost"}
+              disabled={!connected || (!!busy && !testing)}
+              onClick={() => {
+                if (showTests) void stopTests();
+                setShowTests((old) => !old);
+              }}
+            >
+              Test outputs
+            </button>
           </>
         ) : (
           <span className="browser-note">
@@ -204,6 +374,125 @@ export function DevicePanel({ project, bytes, valid, notify }: Props) {
           {showLogs ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
         </button>
       </div>
+      {showTests && (
+        <section className="hardware-testing" aria-label="Manual output test">
+          <div className="row">
+            <strong>
+              {testing
+                ? "Output test active · scene stopped"
+                : "Test one channel at a time"}
+            </strong>
+            <div className="grow" />
+            {testing ? (
+              <>
+                <button
+                  onClick={() => {
+                    latched.current = 0;
+                    heldMask.current = 0;
+                    heldSources.current.clear();
+                    setMask();
+                  }}
+                >
+                  All off
+                </button>
+                <button onClick={() => void stopTests()}>
+                  Exit output test
+                </button>
+              </>
+            ) : (
+              <button
+                className="primary"
+                disabled={
+                  !connected ||
+                  !!busy ||
+                  !valid ||
+                  status.hello?.outputTest !== true ||
+                  status.hello?.board !== project.board
+                }
+                onClick={beginTests}
+              >
+                Enter output test
+              </button>
+            )}
+          </div>
+          <p className="hint">
+            Upload this scene first. Entering test mode stops audio and the
+            sequence and turns every output off. Hold a button for momentary
+            operation, or latch it ON. All off stays in test mode; Exit leaves
+            the controller stopped. Switching workspace or leaving the app stops
+            the test.
+          </p>
+          {status.hello?.outputTest !== true && (
+            <p className="hint">
+              Install firmware with output-test support to use these controls.
+            </p>
+          )}
+          {status.hello?.board !== project.board && (
+            <p className="hint">
+              The connected board must match this project's board.
+            </p>
+          )}
+          <div className="test-output-grid">
+            {project.outputs.map((output, index) => (
+              <div className="test-output" key={output.id}>
+                <span>
+                  {output.name}
+                  <small className="hint"> · D{output.pin}</small>
+                </span>
+                <button
+                  aria-label={`Hold physical ${output.name}`}
+                  aria-pressed={!!(testMask & (1 << index))}
+                  disabled={!testing}
+                  onPointerDown={(event) => {
+                    if (event.button !== 0) return;
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                    holdOutput(index, `pointer:${event.pointerId}`, true);
+                  }}
+                  onPointerUp={(event) => {
+                    holdOutput(index, `pointer:${event.pointerId}`, false);
+                  }}
+                  onPointerCancel={(event) => {
+                    holdOutput(index, `pointer:${event.pointerId}`, false);
+                  }}
+                  onLostPointerCapture={(event) => {
+                    holdOutput(index, `pointer:${event.pointerId}`, false);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.code !== "Space" && event.code !== "Enter")
+                      return;
+                    event.preventDefault();
+                    if (event.repeat) return;
+                    holdOutput(index, `key:${event.code}`, true);
+                  }}
+                  onKeyUp={(event) => {
+                    if (event.code !== "Space" && event.code !== "Enter")
+                      return;
+                    event.preventDefault();
+                    holdOutput(index, `key:${event.code}`, false);
+                  }}
+                  onBlur={() => {
+                    holdOutput(index, "key:Space", false);
+                    holdOutput(index, "key:Enter", false);
+                  }}
+                >
+                  Hold
+                </button>
+                <button
+                  aria-label={`Latch physical ${output.name}`}
+                  aria-pressed={!!(latched.current & (1 << index))}
+                  disabled={!testing}
+                  onClick={() => {
+                    latched.current ^= 1 << index;
+                    setMask();
+                  }}
+                >
+                  {latched.current & (1 << index) ? "ON" : "OFF"}
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
       {showLogs && (
         <>
           <div className="row" style={{ padding: "0 17px 8px" }}>
@@ -242,6 +531,27 @@ export function DevicePanel({ project, bytes, valid, notify }: Props) {
               ? logs.join("\n")
               : "No serial connection opened. Connect explicitly when the controller is ready."}
           </pre>
+          {Array.isArray(feedback?.players) && (
+            <div
+              className="preview-audio-levels"
+              aria-label="Physical audio feedback"
+            >
+              {feedback.players.map(
+                (player: {
+                  index: number;
+                  feedback: string;
+                  busy: boolean | null;
+                }) => (
+                  <span className="badge" key={player.index}>
+                    Player {player.index + 1} · {player.feedback}
+                    {player.busy === null
+                      ? ""
+                      : ` · BUSY ${player.busy ? "active" : "inactive"}`}
+                  </span>
+                ),
+              )}
+            </div>
+          )}
         </>
       )}
       {showFlash && (

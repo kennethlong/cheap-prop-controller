@@ -53,6 +53,14 @@ export function irPins(board: BoardId) {
   return { rxPin: 2, txPin: board === "mega" ? 11 : 9 };
 }
 
+/** A6/A7 on classic Nano/Pro Mini can sample BUSY, but never drive outputs. */
+export function feedbackPins(board: BoardId): number[] {
+  return [
+    ...(board === "nano" || board === "pro-mini" ? [20, 21] : []),
+    ...BOARD_PROFILES[board].digitalPins.filter((pin) => pin >= 2),
+  ];
+}
+
 export interface AllocationResult {
   project: SceneProject;
   issues: ValidationIssue[];
@@ -114,7 +122,25 @@ export function allocatePins(project: SceneProject): AllocationResult {
       player.rxPin = take(`audio.players.${index}.rxPin`);
     }
   });
+  result.audio.players.forEach((player, index) => {
+    if (!player.feedback) return;
+    const pin = feedbackPins(result.board).find(
+      (candidate) => !used.has(candidate),
+    );
+    player.feedback.pin = pin ?? null;
+    if (pin !== undefined) used.add(pin);
+    else
+      issues.push({
+        path: `audio.players.${index}.feedback.pin`,
+        message: "No compatible input remains for MP3 BUSY feedback.",
+        severity: "error",
+      });
+  });
   result.triggers.forEach((trigger, index) => {
+    if (trigger.kind === "timer") {
+      trigger.pin = trigger.echoPin = null;
+      return;
+    }
     trigger.pin = take(`triggers.${index}.pin`);
     trigger.echoPin =
       trigger.kind === "ultrasonic" ? take(`triggers.${index}.echoPin`) : null;
@@ -174,6 +200,8 @@ export function synchronizeAudioPlayers(project: SceneProject): SceneProject {
 
 export function pinLabel(board: BoardId, pin: number | null): string {
   if (pin === null) return "Unassigned";
+  if ((board === "nano" || board === "pro-mini") && (pin === 20 || pin === 21))
+    return `A${pin - 14} (analog input)`;
   const firstAnalog = board === "mega" ? 54 : 14;
   return pin >= firstAnalog ? `A${pin - firstAnalog} / D${pin}` : `D${pin}`;
 }

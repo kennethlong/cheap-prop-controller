@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include "scene_image.hpp"
 #include "timer_uart.hpp"
+#include "audio_feedback.hpp"
 
 namespace cpc {
 // No acknowledgement is assumed. UART transport success is not proof of audible
@@ -10,9 +11,10 @@ class AudioEngine {
   struct Player {
     uint32_t fadeAt, nextCommand;
     uint16_t fadeMs;
-    uint8_t kind, tx, track, volume, sentVolume, from, target, stage;
-    bool loop, preserve, ambientRole;
+    uint8_t kind, tx, track, volume, sentVolume, from, target, stage, generation;
+    bool loop, preserve, ambientRole, feedbackEnabled;
   } players[MaxPlayers];
+  AudioFeedback feedback[MaxPlayers];
   uint8_t count = 0, packet[10], packetSize = 0, packetIndex = 0, packetPlayer = 0, scan = 0;
   uint8_t pendingState = 0;
   uint8_t transmitted = 0;
@@ -20,6 +22,8 @@ class AudioEngine {
   uint8_t ambientOverride = 255, foregroundOverride = 255;
   uint16_t ambientOverrideMs = 0, foregroundOverrideMs = 0;
   bool fadeThroughPending = false;
+  bool foregroundFinished = false;
+  uint8_t packetGeneration = 0, feedbackPending = 0;
   const SceneImage* image = nullptr;
 
   static bool due(uint32_t now, uint32_t at) { return static_cast<int32_t>(now - at) >= 0; }
@@ -36,6 +40,7 @@ class AudioEngine {
   }
   void command(uint8_t index, uint8_t cmd, uint16_t parameter, uint32_t now) {
     packetPlayer = index; packetIndex = 0;
+    packetGeneration = players[index].generation;
     packetSize = audioPacket(players[index].kind == 0, cmd, parameter, packet);
     players[index].nextCommand = now + 60;
   }
@@ -49,6 +54,7 @@ class AudioEngine {
   void start(uint8_t index, uint8_t track, bool loop, uint8_t volume, uint16_t duration, uint32_t now, bool ambientRole, bool restart = false) {
     Player& p = players[index];
     if (p.track != track || p.loop != loop || p.ambientRole != ambientRole || restart) {
+      ++p.generation; feedbackPending &= ~(1 << index); feedback[index].reset(p.feedbackEnabled);
       p.track = track; p.loop = loop; p.ambientRole = ambientRole;
       if (p.stage >= 2) p.stage = 3;
       p.volume = p.from = 0; p.sentVolume = 255;
@@ -156,6 +162,18 @@ class AudioEngine {
       foregroundVolume, foregroundDuration, now, false, true);
   }
  public:
+  void pollFeedbackReady(uint32_t now) {
+    if (feedbackPending && transportIdle()) {
+      for (uint8_t i = 0; i < count; ++i) if (feedbackPending & (1 << i)) feedback[i].start(now);
+      feedbackPending = 0;
+    }
+  }
+  uint8_t feedbackStatus(uint8_t index) const { return feedback[index].status; }
+  void sampleFeedback(uint8_t index, bool active, uint32_t now) {
+    if (feedback[index].sample(active, now) && index == foregroundPlayer && !players[index].loop && !players[index].ambientRole && !fadeThroughPending)
+      foregroundFinished = true;
+  }
+  bool takeForegroundFinished() { const bool result = foregroundFinished; foregroundFinished = false; return result; }
   bool transportIdle() const {
     if (packetIndex < packetSize) return false;
 #if !defined(__AVR_ATmega2560__)
@@ -185,14 +203,15 @@ class AudioEngine {
 #if !defined(__AVR_ATmega2560__)
     timerUart::begin();
 #endif
-    image = source; count = image->b(11); packetSize = packetIndex = scan = transmitted = 0;
+    image = source; count = image->b(11); packetSize = packetIndex = scan = transmitted = feedbackPending = 0;
     ambientPlayer = foregroundPlayer = -1;
     ambientOverride = foregroundOverride = 255;
-    fadeThroughPending = false;
+    fadeThroughPending = foregroundFinished = false;
     for (uint8_t i = 0; i < count; ++i) {
       Player& p = players[i];
       p = Player{};
       const uint16_t address = image->player(i);
+      p.feedbackEnabled = image->b(address + 3) != 0; feedback[i].reset(p.feedbackEnabled);
       p.kind = image->b(address); p.tx = image->b(address + 1); p.sentVolume = 255;
       p.nextCommand = now + 1600; // decoder power-up; scene/USB still run
 #if defined(__AVR_ATmega2560__)
@@ -206,17 +225,20 @@ class AudioEngine {
   }
   void stop(uint32_t now) {
     // Finish a packet already in flight so subsequent STOP retains framing.
-    fadeThroughPending = false;
+    fadeThroughPending = foregroundFinished = false;
+    feedbackPending = 0;
     ambientPlayer = foregroundPlayer = -1;
     ambientOverride = foregroundOverride = 255;
     cancelUnsentStart();
     if (!packetIndex && packetSize && packet[3] == 0x06) packetSize = 0;
     for (uint8_t i = 0; i < count; ++i) {
       Player& p = players[i]; p.track = 0; p.stage = 7; p.target = p.volume = 0;
+      feedback[i].reset(p.feedbackEnabled);
       p.nextCommand = now;
     }
   }
   void enter(uint8_t stateIndex, uint32_t now) {
+    foregroundFinished = false;
     if (!count || !image) return;
     ambientOverride = foregroundOverride = 255;
     ambientPlayer = foregroundPlayer = -1;
@@ -285,9 +307,14 @@ class AudioEngine {
   }
   void update(uint32_t now, bool timingCritical) {
     if (packetIndex < packetSize) {
-      if (!timingCritical && sendByte(packetPlayer, packet[packetIndex])) ++packetIndex;
+      if (!timingCritical && sendByte(packetPlayer, packet[packetIndex])) {
+        ++packetIndex;
+        if (packetIndex == packetSize && packet[3] == 0x0f && players[packetPlayer].track == packet[6] && players[packetPlayer].generation == packetGeneration)
+          feedbackPending |= 1 << packetPlayer;
+      }
       return;
     }
+    pollFeedbackReady(now);
     if (fadeThroughPending && readyForFadeThrough()) applyFadeThrough(now);
     for (uint8_t n = 0; n < count; ++n) {
       const uint8_t i = scan++ % count;
@@ -299,12 +326,12 @@ class AudioEngine {
       if (p.stage == 3) { command(i, 0x06, 0, now); p.sentVolume = 0; p.stage = 4; return; }
       if (p.stage == 4) { command(i, 0x0f, 0x0100 | p.track, now); p.stage = 5; return; }
       if (p.stage == 5) { command(i, 0x19, p.loop ? 0 : 1, now); p.stage = 2; p.fadeAt = now; return; }
-      if (p.stage == 7) { command(i, 0x16, 0, now); p.stage = 2; p.track = 0; return; }
+      if (p.stage == 7) { command(i, 0x16, 0, now); p.stage = 2; p.track = 0; feedback[i].reset(p.feedbackEnabled); return; }
       if (!p.track) continue;
       const uint32_t elapsed = now - p.fadeAt;
       p.volume = (!p.fadeMs || elapsed >= p.fadeMs) ? p.target : static_cast<uint8_t>(static_cast<int32_t>(p.from) + (static_cast<int32_t>(p.target) - p.from) * static_cast<int32_t>(elapsed) / p.fadeMs);
       if (p.sentVolume != p.volume) { command(i, 0x06, p.volume, now); p.sentVolume = p.volume; return; }
-      if (!p.volume && !p.target && !p.preserve) { command(i, 0x16, 0, now); p.track = 0; return; }
+      if (!p.volume && !p.target && !p.preserve) { command(i, 0x16, 0, now); p.track = 0; feedback[i].reset(p.feedbackEnabled); return; }
     }
   }
 };

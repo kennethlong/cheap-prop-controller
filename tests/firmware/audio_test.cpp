@@ -3,6 +3,7 @@
 #include <string.h>
 #define __AVR_ATmega2560__
 #include "audio_engine.hpp"
+#include "audio_feedback.hpp"
 HardwareSerial Serial1, Serial2, Serial3;
 static uint8_t bytes[128];
 static uint8_t read(uint16_t index) { assert(index < sizeof(bytes)); return bytes[index]; }
@@ -462,7 +463,78 @@ static void testVolumePendingAndZeroDefaults() {
   assert(commandAt(Serial1, 0x06, 30, 3500) == UINT32_MAX);
   assert(commands(Serial1, 0x16) == 2);
 }
+static void testBusyFeedbackPrimitive() {
+  cpc::AudioFeedback feedback;
+  feedback.reset(false); feedback.start(0);
+  assert(!feedback.sample(true, 5000) && feedback.status == cpc::AudioFeedback::Disabled);
+  feedback.reset(true); assert(feedback.status == cpc::AudioFeedback::Stopped);
+  feedback.start(1000);
+  assert(!feedback.sample(false, 2000) && feedback.status == cpc::AudioFeedback::Waiting);
+  assert(!feedback.sample(true, 2100)); assert(!feedback.sample(false, 2150));
+  assert(!feedback.sample(true, 2200)); assert(!feedback.sample(true, 2299));
+  assert(!feedback.sample(true, 2300) && feedback.status == cpc::AudioFeedback::Playing);
+  assert(!feedback.sample(false, 2500)); assert(!feedback.sample(true, 2550));
+  assert(!feedback.sample(false, 2600)); assert(!feedback.sample(false, 2699));
+  assert(feedback.sample(false, 2700) && feedback.status == cpc::AudioFeedback::Finished);
+  assert(!feedback.sample(false, 8000)); // Completion is a one-shot edge.
+  feedback.start(9000); assert(!feedback.sample(false, 13999));
+  assert(!feedback.sample(false, 14000) && feedback.status == cpc::AudioFeedback::Failed);
+  assert(!feedback.sample(true, 15000)); // A disconnected/missing player never ends a state.
+  feedback.start(0xffffff00UL); assert(!feedback.sample(true, 0xffffff00UL));
+  assert(!feedback.sample(true, 0xffffff64UL));
+  assert(!feedback.sample(false, 0xfffffff0UL));
+  assert(feedback.sample(false, 0x54UL)); // Debounce survives millis wrap.
+  feedback.reset(true); assert(!feedback.sample(false, 1000));
+}
+static void testAudioFeedbackRouting() {
+  sequentialFixture(false, 0, 0); bytes[3] = '2'; bytes[35] = 3;
+  bytes[image.state(1) + 13] = 1;
+  word(6, image.crc(image.u16(4))); assert(image.valid(4096, 4));
+  cpc::AudioEngine engine; engine.begin(&image, 0); engine.enter(0, 0);
+  assert(engine.feedbackStatus(0) == cpc::AudioFeedback::Stopped);
+  engine.sampleFeedback(0, true, 1000); assert(!engine.takeForegroundFinished());
+  advance(engine, 0, 3000);
+  assert(engine.feedbackStatus(0) == cpc::AudioFeedback::Waiting);
+  engine.sampleFeedback(0, true, 3000); engine.sampleFeedback(0, true, 3100);
+  assert(engine.feedbackStatus(0) == cpc::AudioFeedback::Playing);
+  engine.sampleFeedback(0, false, 3200); engine.sampleFeedback(0, false, 3300);
+  assert(!engine.takeForegroundFinished()); // Ambient BUSY cannot end a foreground state.
+
+  engine.enter(1, 3400); advance(engine, 3400, 4200);
+  assert(engine.feedbackStatus(0) == cpc::AudioFeedback::Waiting);
+  engine.sampleFeedback(0, false, 4200); assert(!engine.takeForegroundFinished());
+  engine.sampleFeedback(0, true, 4500); engine.sampleFeedback(0, true, 4600);
+  engine.sampleFeedback(0, false, 4650); engine.sampleFeedback(0, true, 4670);
+  engine.sampleFeedback(0, false, 4700); engine.sampleFeedback(0, false, 4799);
+  assert(!engine.takeForegroundFinished());
+  engine.sampleFeedback(0, false, 4800); assert(engine.takeForegroundFinished());
+  assert(!engine.takeForegroundFinished());
+
+  engine.enter(1, 4900); advance(engine, 4900, 5800);
+  engine.sampleFeedback(0, false, 12000);
+  assert(engine.feedbackStatus(0) == cpc::AudioFeedback::Failed && !engine.takeForegroundFinished());
+  engine.enter(1, 12000); advance(engine, 12000, 13000);
+  engine.sampleFeedback(0, true, 13000); engine.sampleFeedback(0, true, 13100);
+  engine.sampleFeedback(0, false, 13200); engine.sampleFeedback(0, false, 13300);
+  engine.enter(2, 13300); assert(!engine.takeForegroundFinished()); // Old completion never survives another state.
+  engine.stop(13400); assert(engine.feedbackStatus(0) == cpc::AudioFeedback::Stopped);
+
+  fixture(); bytes[3] = '2'; bytes[35] = 3; bytes[39] = 4; bytes[43] = 5;
+  word(6, image.crc(image.u16(4))); assert(image.valid(4096, 4));
+  engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, 3000);
+  engine.enter(1, 3000); advance(engine, 3000, 4000);
+  engine.sampleFeedback(1, true, 4000); engine.sampleFeedback(1, true, 4100);
+  engine.enter(2, 4200); // Retiring player1 remains BUSY while new player2 starts.
+  engine.sampleFeedback(1, false, 4200); engine.sampleFeedback(1, false, 4300);
+  assert(!engine.takeForegroundFinished());
+  advance(engine, 4200, 5000);
+  engine.sampleFeedback(2, true, 5000); engine.sampleFeedback(2, true, 5100);
+  engine.sampleFeedback(2, false, 5200); engine.sampleFeedback(2, false, 5300);
+  assert(engine.takeForegroundFinished());
+}
 int main() {
+  testBusyFeedbackPrimitive();
+  testAudioFeedbackRouting();
   fixture(); cpc::AudioEngine engine;
   engine.begin(&image, 0); engine.enter(0, 0);
   advance(engine, 0, 1500); assert(Serial1.bytes.empty());
@@ -497,5 +569,5 @@ int main() {
   testSequentialDurations(); testSequentialLatestAndStop(); testSequentialPersistentAmbient(); testSequentialPacketCancellation();
   testMixedAmbientTransitions(); testMixedLatestAndStop(); testMixedStartupAndCancellation();
   testVolumeActions(); testVolumePendingAndZeroDefaults();
-  puts("Audio host tests passed: role-volume actions, zero-volume continuity, pending overrides, retirement, framing, crossfade/cut/sequential fades, ambient mixing, startup, STOP, echo scheduling.");
+  puts("Audio host tests passed: BUSY debounce/start timeout/foreground routing, role-volume actions, packet retirement, crossfade/cut/sequential fades, ambient mixing, startup, STOP, echo scheduling.");
 }

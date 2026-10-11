@@ -6,6 +6,7 @@ import {
   type ZoneAction,
 } from "./model";
 import { parseProject, validateProject } from "./validation";
+import { getMediaClip } from "./media-clip";
 import {
   resolveAmbientMixVolume,
   resolveAudioTransition,
@@ -50,6 +51,7 @@ export interface SimulatorSnapshot {
   running: boolean;
 }
 interface Voice extends AudioVoice {
+  stateEpoch: number;
   startedAt: number;
   fadeStartedAt: number;
   fadeDurationMs: number;
@@ -72,6 +74,7 @@ interface InputState {
   stable: boolean;
   changedAt: number;
   armed: boolean;
+  activated: boolean;
 }
 interface DistanceState {
   distanceCm: number | null;
@@ -79,6 +82,11 @@ interface DistanceState {
   baselined: boolean;
   candidateId: string | null;
   candidateSince: number | null;
+}
+interface ZoneCrossing {
+  onExit: ZoneAction[];
+  onEnter: ZoneAction[];
+  entered: boolean;
 }
 
 /** Deterministic logical preview. Audio decoder startup/latency remain hardware measurements. */
@@ -94,6 +102,8 @@ export class SceneSimulator {
   private irActivity: IrActivity[] = [];
   private irSequence = 0;
   private stateEpoch = 0;
+  private readonly timerStarted = new Map<string, number>();
+  private readonly roundRobin = new Map<string, number>();
   private readonly inputs = new Map<string, InputState>();
   private readonly distances = new Map<string, DistanceState>();
 
@@ -116,8 +126,10 @@ export class SceneSimulator {
         stable: false,
         changedAt: 0,
         armed: true,
+        activated: false,
       }),
     );
+    this.restartTimers(false);
     this.project.triggers
       .filter((trigger) => trigger.kind === "ultrasonic")
       .forEach((trigger) => {
@@ -150,24 +162,46 @@ export class SceneSimulator {
       if (this.current.loopTimeline) this.elapsed %= this.current.durationMs;
       else this.elapsed = Math.min(this.elapsed, this.current.durationMs);
       const rising = new Set<string>();
+      const falling = new Set<string>();
       this.project.triggers.forEach((trigger) => {
-        if (isZonedTrigger(trigger)) return;
+        if (isZonedTrigger(trigger) || trigger.kind === "timer") return;
         const input = this.inputs.get(trigger.id)!;
         if (
           input.raw !== input.stable &&
           this.total - input.changedAt >= trigger.debounceMs
         ) {
           input.stable = input.raw;
-          if (!input.stable) input.armed = true;
-          else if (input.armed) {
+          if (!input.stable) {
+            input.armed = true;
+            if (input.activated) falling.add(trigger.id);
+            input.activated = false;
+          } else if (input.armed) {
             input.armed = false;
+            input.activated = true;
             rising.add(trigger.id);
           }
         }
       });
-      this.applyTriggers(rising);
+      const crossings = this.project.triggers
+        .filter(isZonedTrigger)
+        .map((trigger) => this.sampleZones(trigger))
+        .filter((crossing): crossing is ZoneCrossing => crossing !== null);
+      if (rising.size || crossings.some((crossing) => crossing.entered))
+        this.restartTimers(true);
       this.project.triggers.forEach((trigger) => {
-        if (isZonedTrigger(trigger)) this.sampleZones(trigger);
+        if (trigger.kind !== "timer") return;
+        if (
+          this.total - this.timerStarted.get(trigger.id)! >=
+          (trigger.timerIntervalMs ?? 30000)
+        ) {
+          rising.add(trigger.id);
+          this.timerStarted.set(trigger.id, this.total);
+        }
+      });
+      this.applyTriggers(rising, falling);
+      crossings.forEach((crossing) => {
+        this.applyZoneActions(crossing.onExit);
+        this.applyZoneActions(crossing.onEnter);
       });
       // Input/state actions take priority. Entering another state already fired
       // its tick-zero cues and cancels the previous state's due commands.
@@ -178,6 +212,7 @@ export class SceneSimulator {
         } else this.fireTimelineIr(previousElapsed, this.elapsed);
       }
       this.refreshVoices();
+      if (epoch === this.stateEpoch) this.finishKnownForeground();
     }
     return this.snapshot();
   }
@@ -185,14 +220,51 @@ export class SceneSimulator {
   /** UI trigger button injects a clean edge, like the device's virtual-trigger command. */
   trigger(triggerId: string): boolean {
     const trigger = this.project.triggers.find((item) => item.id === triggerId);
-    if (!trigger || isZonedTrigger(trigger)) return false;
+    if (!this.running || !trigger || isZonedTrigger(trigger)) return false;
+    this.restartTimers(true);
     return this.applyTriggers(new Set([triggerId]));
+  }
+
+  /** Inject a clean release edge for preview; physical inputs use setTrigger. */
+  release(triggerId: string): boolean {
+    const trigger = this.project.triggers.find((item) => item.id === triggerId);
+    if (!trigger || trigger.kind === "timer" || isZonedTrigger(trigger))
+      return false;
+    return this.applyTriggers(new Set(), new Set([triggerId]));
+  }
+
+  /** Model a confirmed current foreground ending, without sending hardware commands. */
+  audioFinished(playerIndex?: number): boolean {
+    if (
+      !this.running ||
+      !this.current.audioEndStateId ||
+      this.current.loopAudio
+    )
+      return false;
+    this.refreshVoices();
+    const voice = this.voices.find(
+      (candidate) =>
+        candidate.role === "foreground" &&
+        !candidate.stopWhenSilent &&
+        candidate.stateEpoch === this.stateEpoch &&
+        !candidate.loop &&
+        (playerIndex === undefined || candidate.playerIndex === playerIndex),
+    );
+    if (!voice || !this.project.audio.players[voice.playerIndex]?.feedback)
+      return false;
+    this.enter(this.current.audioEndStateId);
+    return true;
   }
 
   /** Physical-input preview: debounce and release-before-rearm apply. */
   setTrigger(triggerId: string, active: boolean): void {
     const input = this.inputs.get(triggerId);
     if (!input) throw new Error(`Unknown trigger: ${triggerId}`);
+    if (
+      this.project.triggers.find((item) => item.id === triggerId)?.kind ===
+      "timer"
+    )
+      throw new Error("Timer inputs advance automatically.");
     if (
       isZonedTrigger(
         this.project.triggers.find((item) => item.id === triggerId)!,
@@ -229,14 +301,10 @@ export class SceneSimulator {
       return;
     }
     const input = this.inputs.get(triggerId)!;
-    if (
-      centimeters === null ||
-      centimeters < 2 ||
-      centimeters > 400 ||
-      centimeters >= trigger.thresholdCm + trigger.hysteresisCm
-    )
+    if (distance.distanceCm === null) return;
+    if (centimeters! >= trigger.thresholdCm + trigger.hysteresisCm)
       this.setTrigger(triggerId, false);
-    else if (centimeters <= trigger.thresholdCm)
+    else if (centimeters! <= trigger.thresholdCm)
       this.setTrigger(triggerId, true);
     else this.setTrigger(triggerId, input.raw);
   }
@@ -245,6 +313,14 @@ export class SceneSimulator {
     this.running = true;
     this.remainder = 0;
     this.irActivity = [];
+    this.roundRobin.clear();
+    this.restartTimers(false);
+    this.inputs.forEach((input) => {
+      input.stable = input.raw;
+      input.armed = !input.raw;
+      input.changedAt = this.total;
+      input.activated = false;
+    });
     this.distances.forEach((distance) => {
       distance.baselined = false;
       distance.zoneId = null;
@@ -279,15 +355,15 @@ export class SceneSimulator {
       null,
     ) as Record<string, boolean>;
     this.project.outputs.forEach((output) => {
+      const interval = this.current.events.find(
+        (event) =>
+          event.outputId === output.id &&
+          this.elapsed >= event.startMs &&
+          this.elapsed < event.endMs,
+      );
       const active =
         this.running &&
-        (output.idleActive ||
-          this.current.events.some(
-            (event) =>
-              event.outputId === output.id &&
-              this.elapsed >= event.startMs &&
-              this.elapsed < event.endMs,
-          ));
+        (interval ? interval.active !== false : output.idleActive);
       outputs[output.id] = active;
       physicalOutputs[output.id] = active !== output.activeLow;
     });
@@ -337,14 +413,55 @@ export class SceneSimulator {
     };
   }
 
-  private applyTriggers(rising: Set<string>): boolean {
-    if (!this.running || rising.size === 0) return false;
+  private applyTriggers(
+    rising: Set<string>,
+    falling = new Set<string>(),
+  ): boolean {
+    if (!this.running || (rising.size === 0 && falling.size === 0))
+      return false;
     const transition = this.current.transitions.find((candidate) =>
-      rising.has(candidate.triggerId),
+      (candidate.edge === "release" ? falling : rising).has(
+        candidate.triggerId,
+      ),
     );
     if (!transition) return false;
-    this.enter(transition.targetStateId);
+    const targets = [
+      transition.targetStateId,
+      ...(transition.alternateStateIds ?? []),
+    ];
+    const key = `${this.current.id}\0${transition.triggerId}\0${transition.edge ?? "activate"}`;
+    const next = this.roundRobin.get(key) ?? 0;
+    this.roundRobin.set(key, (next + 1) % targets.length);
+    this.enter(targets[next % targets.length]);
     return true;
+  }
+
+  private restartTimers(externalOnly: boolean): void {
+    this.project.triggers.forEach((trigger) => {
+      if (
+        trigger.kind === "timer" &&
+        (!externalOnly || trigger.timerResetOnTrigger)
+      )
+        this.timerStarted.set(trigger.id, this.total);
+    });
+  }
+
+  private finishKnownForeground(): void {
+    if (!this.current.audioEndStateId) return;
+    const foreground = this.voices.find(
+      (voice) =>
+        voice.role === "foreground" &&
+        !voice.stopWhenSilent &&
+        voice.stateEpoch === this.stateEpoch &&
+        !voice.loop,
+    );
+    if (!foreground) return;
+    const track = this.project.audio.tracks.find(
+      (item) => item.number === foreground.track,
+    );
+    const duration = track ? getMediaClip(track).durationMs : 0;
+    if (duration > 0 && this.total - foreground.startedAt >= duration)
+      this.audioFinished(foreground.playerIndex);
   }
 
   private enter(stateId: string): void {
@@ -381,11 +498,11 @@ export class SceneSimulator {
         this.recordIr(event.commandId, "timeline");
   }
 
-  private sampleZones(trigger: TriggerConfig): void {
+  private sampleZones(trigger: TriggerConfig): ZoneCrossing | null {
     const distance = this.distances.get(trigger.id)!;
     if (distance.distanceCm === null) {
       distance.candidateSince = null;
-      return;
+      return null;
     }
     const zones = trigger.zones ?? [];
     const current = zones.find((zone) => zone.id === distance.zoneId);
@@ -403,22 +520,25 @@ export class SceneSimulator {
       distance.baselined = true;
       distance.zoneId = nextId;
       distance.candidateSince = null;
-      return;
+      return null;
     }
     if (nextId === distance.zoneId) {
       distance.candidateSince = null;
-      return;
+      return null;
     }
     if (distance.candidateSince === null || distance.candidateId !== nextId) {
       distance.candidateId = nextId;
       distance.candidateSince = this.total;
     }
-    if (this.total - distance.candidateSince < trigger.debounceMs) return;
+    if (this.total - distance.candidateSince < trigger.debounceMs) return null;
     distance.zoneId = nextId;
     distance.candidateSince = null;
     // Record the crossing before dispatch; entering a scene does not rearm sensors.
-    this.applyZoneActions(current?.onExit ?? []);
-    this.applyZoneActions(next?.onEnter ?? []);
+    return {
+      onExit: current?.onExit ?? [],
+      onEnter: next?.onEnter ?? [],
+      entered: nextId !== null,
+    };
   }
 
   private applyZoneActions(actions: ZoneAction[]): void {
@@ -548,6 +668,7 @@ export class SceneSimulator {
       const duration = item.fadeMs ?? fadeDurationMs;
       return {
         ...item,
+        stateEpoch: this.stateEpoch,
         playerIndex,
         volume: duration === 0 ? item.volume : 0,
         positionMs: 0,
@@ -697,6 +818,7 @@ export class SceneSimulator {
         }
         existing = {
           ...item,
+          stateEpoch: this.stateEpoch,
           playerIndex,
           volume: 0,
           positionMs: 0,

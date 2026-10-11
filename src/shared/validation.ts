@@ -1,10 +1,12 @@
 import {
   BOARD_PROFILES,
+  feedbackPins,
   irPins,
   requiredPlayerCount,
   SHIELD_PINS,
 } from "./boards";
 import { irCommandDurationMs, validateIrSignal } from "./ir";
+import { timerInterval, transitionTargets } from "./scene-controls";
 import {
   isZonedTrigger,
   LIMITS,
@@ -88,7 +90,11 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
     if (!trigger) return;
     text(trigger.id, `${path}.id`);
     text(trigger.name, `${path}.name`);
-    enumeration(trigger.kind, ["button", "pir", "ultrasonic"], `${path}.kind`);
+    enumeration(
+      trigger.kind,
+      ["button", "pir", "ultrasonic", "timer"],
+      `${path}.kind`,
+    );
     number(trigger.pin, `${path}.pin`, true);
     number(trigger.echoPin, `${path}.echoPin`, true);
     boolean(trigger.activeLow, `${path}.activeLow`);
@@ -96,6 +102,10 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
     number(trigger.debounceMs, `${path}.debounceMs`);
     number(trigger.thresholdCm, `${path}.thresholdCm`);
     number(trigger.hysteresisCm, `${path}.hysteresisCm`);
+    if (trigger.timerIntervalMs !== undefined)
+      number(trigger.timerIntervalMs, `${path}.timerIntervalMs`);
+    if (trigger.timerResetOnTrigger !== undefined)
+      boolean(trigger.timerResetOnTrigger, `${path}.timerResetOnTrigger`);
     if (trigger.distanceMode !== undefined)
       enumeration(
         trigger.distanceMode,
@@ -193,6 +203,13 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
       enumeration(player.kind, ["dfplayer", "yx5300"], `${path}.kind`);
       number(player.txPin, `${path}.txPin`, true);
       number(player.rxPin, `${path}.rxPin`, true);
+      if (player.feedback !== undefined) {
+        const feedback = object(player.feedback, `${path}.feedback`);
+        if (feedback) {
+          number(feedback.pin, `${path}.feedback.pin`, true);
+          boolean(feedback.activeLow, `${path}.feedback.activeLow`);
+        }
+      }
     });
     array(audio.tracks, "audio.tracks", 10000).forEach((candidate, index) => {
       const path = `audio.tracks.${index}`;
@@ -224,6 +241,8 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
     number(state.volume, `${path}.volume`);
     boolean(state.loopTimeline, `${path}.loopTimeline`);
     boolean(state.loopAudio, `${path}.loopAudio`);
+    if (state.audioEndStateId !== undefined && state.audioEndStateId !== null)
+      text(state.audioEndStateId, `${path}.audioEndStateId`);
     if (state.irEvents !== undefined)
       array(state.irEvents, `${path}.irEvents`, 1024).forEach(
         (candidate, eventIndex) => {
@@ -244,6 +263,8 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
         text(event.outputId, `${eventPath}.outputId`);
         number(event.startMs, `${eventPath}.startMs`);
         number(event.endMs, `${eventPath}.endMs`);
+        if (event.active !== undefined)
+          boolean(event.active, `${eventPath}.active`);
       },
     );
     array(state.transitions, `${path}.transitions`, 256).forEach(
@@ -253,6 +274,20 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
         if (!transition) return;
         text(transition.triggerId, `${transitionPath}.triggerId`);
         text(transition.targetStateId, `${transitionPath}.targetStateId`);
+        if (transition.edge !== undefined)
+          enumeration(
+            transition.edge,
+            ["activate", "release"],
+            `${transitionPath}.edge`,
+          );
+        if (transition.alternateStateIds !== undefined)
+          array(
+            transition.alternateStateIds,
+            `${transitionPath}.alternateStateIds`,
+            64,
+          ).forEach((id, i) =>
+            text(id, `${transitionPath}.alternateStateIds.${i}`),
+          );
       },
     );
   });
@@ -307,7 +342,13 @@ export function estimateSceneBytes(project: SceneProject): number {
     project.states.length * 16 +
     project.states.reduce(
       (sum, state) =>
-        sum + state.events.length * 6 + state.transitions.length * 2,
+        sum +
+        state.events.length * 6 +
+        state.transitions.reduce(
+          (count, transition) =>
+            count + transitionTargets(transition).length * 2,
+          0,
+        ),
       0,
     )
   );
@@ -360,12 +401,16 @@ export function validateProject(value: unknown): ValidationIssue[] {
   let totalZoneActions = 0;
   const profile = BOARD_PROFILES[project.board];
   const used = new Map<number, string>();
-  const claimPin = (pin: number | null, path: string) => {
+  const claimPin = (
+    pin: number | null,
+    path: string,
+    allowedPins = profile.digitalPins,
+  ) => {
     if (pin === null) {
       fail(path, "Assign a GPIO pin.");
       return;
     }
-    if (!Number.isInteger(pin) || !profile.digitalPins.includes(pin)) {
+    if (!Number.isInteger(pin) || !allowedPins.includes(pin)) {
       fail(path, "Pin is not a digital-capable GPIO on this board.");
       return;
     }
@@ -438,6 +483,17 @@ export function validateProject(value: unknown): ValidationIssue[] {
   project.triggers.forEach((trigger, index) => {
     const path = `triggers.${index}`;
     nonempty(trigger.name, `${path}.name`);
+    if (trigger.kind === "timer") {
+      if (trigger.pin !== null || trigger.echoPin !== null)
+        fail(path, "Timer triggers do not use GPIO pins.");
+      ticks(
+        timerInterval(trigger),
+        50,
+        LIMITS.maxDurationMs,
+        `${path}.timerIntervalMs`,
+      );
+      return;
+    }
     claimPin(trigger.pin, `${path}.pin`);
     ticks(trigger.debounceMs, 0, 12750, `${path}.debounceMs`);
     integer(trigger.thresholdCm, 2, 400, `${path}.thresholdCm`);
@@ -528,6 +584,12 @@ export function validateProject(value: unknown): ValidationIssue[] {
     const path = `audio.players.${index}`;
     claimPin(player.txPin, `${path}.txPin`);
     claimPin(player.rxPin, `${path}.rxPin`);
+    if (player.feedback)
+      claimPin(
+        player.feedback.pin,
+        `${path}.feedback.pin`,
+        feedbackPins(project.board),
+      );
     if (profile.uartPairs.length) {
       const pair = profile.uartPairs[index];
       if (!pair || player.txPin !== pair.tx || player.rxPin !== pair.rx)
@@ -612,6 +674,30 @@ export function validateProject(value: unknown): ValidationIssue[] {
         `${path}.foregroundTrack`,
         "The initial state uses the global ambient track, not a foreground track.",
       );
+    if (state.audioEndStateId !== undefined && state.audioEndStateId !== null) {
+      if (!states.has(state.audioEndStateId))
+        fail(
+          `${path}.audioEndStateId`,
+          "Audio-end target state does not exist.",
+        );
+      if (
+        state.id === project.initialStateId ||
+        state.foregroundTrack === null ||
+        state.loopAudio
+      )
+        fail(
+          `${path}.audioEndStateId`,
+          "Audio-end transitions require a nonlooping foreground track outside the initial state.",
+        );
+      if (
+        !project.audio.players.length ||
+        project.audio.players.some((player) => !player.feedback)
+      )
+        fail(
+          `${path}.audioEndStateId`,
+          "Enable and wire BUSY feedback for every MP3 player before using audio-end transitions.",
+        );
+    }
     uniqueIds(state.events, `${path}.events`);
     const irEvents = state.irEvents ?? [];
     uniqueIds(irEvents, `${path}.irEvents`);
@@ -680,7 +766,7 @@ export function validateProject(value: unknown): ValidationIssue[] {
     integer(
       state.transitions.length,
       0,
-      LIMITS.triggers,
+      LIMITS.triggers * 2,
       `${path}.transitions`,
     );
     state.transitions.forEach((transition, index) => {
@@ -700,14 +786,60 @@ export function validateProject(value: unknown): ValidationIssue[] {
         );
       if (!states.has(transition.targetStateId))
         fail(`${transitionPath}.targetStateId`, "Target state does not exist.");
-      if (transitionTriggers.has(transition.triggerId))
+      const trigger = project.triggers.find(
+        (item) => item.id === transition.triggerId,
+      );
+      if (
+        transition.edge === "release" &&
+        trigger &&
+        (trigger.kind === "timer" || isZonedTrigger(trigger))
+      )
+        fail(
+          `${transitionPath}.edge`,
+          "Release transitions require a digital or single-threshold ultrasonic input.",
+        );
+      const targets = transitionTargets(transition);
+      integer(
+        targets.length,
+        1,
+        LIMITS.states,
+        `${transitionPath}.alternateStateIds`,
+      );
+      if (new Set(targets).size !== targets.length)
+        fail(
+          `${transitionPath}.alternateStateIds`,
+          "Round-robin destinations must be distinct.",
+        );
+      targets.slice(1).forEach((id, i) => {
+        if (!states.has(id))
+          fail(
+            `${transitionPath}.alternateStateIds.${i}`,
+            "Target state does not exist.",
+          );
+      });
+      const key = `${transition.triggerId}:${transition.edge ?? "activate"}`;
+      if (transitionTriggers.has(key))
         fail(
           transitionPath,
-          "Only one transition per trigger is allowed within a state.",
+          "Only one transition per trigger and edge is allowed within a state.",
         );
-      transitionTriggers.add(transition.triggerId);
+      transitionTriggers.add(key);
     });
   });
+  integer(
+    project.states.reduce(
+      (sum, state) =>
+        sum +
+        state.transitions.reduce(
+          (count, transition) => count + transitionTargets(transition).length,
+          0,
+        ),
+      0,
+    ),
+    0,
+    LIMITS.expandedTransitions,
+    "transitions",
+  );
   integer(
     project.states.reduce(
       (sum, state) => sum + (state.irEvents?.length ?? 0),

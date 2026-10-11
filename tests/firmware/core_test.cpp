@@ -193,6 +193,88 @@ static void testDebounce() {
   assert(!input.update(true, 1200, 50));
   input.reset(false, 0xfffffff0UL);
   assert(!input.update(true, 0xfffffff8UL, 50)); assert(input.update(true, 0x30UL, 50));
+  input.reset(true, 0);
+  assert(!input.updateEdges(false, 1, 50)); assert(!input.updateEdges(false, 51, 50)); // Boot-held release is silent.
+  assert(!input.updateEdges(true, 60, 50)); assert(input.updateEdges(true, 110, 50) == 1);
+  assert(!input.updateEdges(false, 120, 50)); assert(input.updateEdges(false, 170, 50) == 2);
+  assert(!input.updateEdges(false, 200, 50));
+}
+static void controlsFixture() {
+  fixture(); bytes[3] = '2'; bytes[33] = 2; bytes[89] = 1; // Normally ON, explicitly OFF in the first interval.
+  bytes[44] = 3; bytes[45] = bytes[46] = 255; bytes[47] = 1;
+  word(48, 10); bytes[50] = bytes[51] = 0;
+  size = 112; word(4, size);
+  bytes[62] = 2; word(76, 2); bytes[78] = 3;
+  bytes[102] = 0; bytes[103] = 1; bytes[104] = 0; bytes[105] = 0;
+  bytes[106] = 128; bytes[107] = 0;
+  bytes[108] = 1; bytes[109] = 1; bytes[110] = 0; bytes[111] = 1;
+  seal(); assert(image.valid(1024, 1));
+}
+static void testSceneControlsValidation() {
+  controlsFixture(); assert(image.sceneControls());
+  bytes[3] = '1'; seal(); assert(!image.valid(1024, 1));
+  controlsFixture(); bytes[45] = 7; seal(); assert(!image.valid(1024, 1));
+  controlsFixture(); bytes[46] = 7; seal(); assert(!image.valid(1024, 1));
+  controlsFixture(); bytes[47] = 2; seal(); assert(!image.valid(1024, 1));
+  controlsFixture(); word(48, 0); seal(); assert(!image.valid(1024, 1));
+  controlsFixture(); bytes[50] = 1; seal(); assert(!image.valid(1024, 1));
+  controlsFixture(); bytes[51] = 1; seal(); assert(!image.valid(1024, 1));
+  controlsFixture(); bytes[89] = 2; seal(); assert(!image.valid(1024, 1));
+  controlsFixture(); bytes[105] = 1; seal(); assert(!image.valid(1024, 1)); // Repeated destination in one group.
+  controlsFixture(); bytes[106] = 129; seal(); assert(!image.valid(1024, 1)); // Timers cannot release.
+  controlsFixture(); bytes[106] = 8; seal(); assert(!image.valid(1024, 1)); // Reserved transition bits.
+  controlsFixture(); bytes[110] = 128; seal(); assert(!image.valid(1024, 1)); // Noncontiguous duplicate group.
+  controlsFixture(); bytes[65] = 1; seal(); assert(!image.valid(1024, 1)); // Initial state cannot audio-end.
+  controlsFixture(); bytes[81] = 1; seal(); assert(!image.valid(1024, 1)); // Foreground required.
+  controlsFixture(); bytes[82] = 1; seal(); assert(!image.valid(1024, 1)); // Reserved state byte.
+  // Each new record feature independently rejects downgrade to CPC1.
+  fixture(); bytes[89] = 1; seal(); assert(!image.valid(1024, 1));
+  fixture(); bytes[104] |= 128; seal(); assert(!image.valid(1024, 1));
+}
+static void testSceneControlsRuntime() {
+  controlsFixture(); cpc::SceneRuntime runtime; runtime.begin(&image); runtime.run(0);
+  assert(runtime.activeOutputs(0) == 1);
+  assert(runtime.trigger(1, 100) && runtime.currentState == 1);
+  assert(runtime.activeOutputs(100) == 0 && runtime.activeOutputs(599) == 0);
+  assert(runtime.activeOutputs(600) == 1); // OFF ends at half-open boundary, returning to idle ON.
+  assert(runtime.trigger(0, 600, 1) && runtime.currentState == 0);
+  assert(runtime.trigger(1, 700) && runtime.currentState == 0 && runtime.enteredAt == 700); // Second round-robin destination.
+  assert(runtime.trigger(1, 800) && runtime.currentState == 1);
+  runtime.run(1000); assert(runtime.trigger(1, 1000) && runtime.currentState == 1); // RUN resets every cursor.
+  runtime.stop(); assert(!runtime.trigger(1, 1100) && runtime.activeOutputs(1100) == 0);
+
+  runtime.run(0); assert(!runtime.timerEdges(499)); assert(runtime.timerEdges(500) == 2);
+  assert(runtime.timerEdges(5000) == 2); assert(!runtime.timerEdges(5001)); // No catch-up burst.
+  runtime.run(0); runtime.enter(1, 400); assert(runtime.timerEdges(500) == 2); // State entry never restarts timer.
+  runtime.run(0); assert(!runtime.timerEdges(500, true)); assert(!runtime.timerEdges(999)); assert(runtime.timerEdges(1000) == 2);
+  runtime.run(0); runtime.resetExternalTimers(250); assert(!runtime.timerEdges(500)); assert(runtime.timerEdges(750) == 2);
+  bytes[47] = 0; runtime.run(0); assert(runtime.timerEdges(500, true) == 2); // Independent timer ignores external reset.
+  runtime.run(0xfffffff0UL); assert(!runtime.timerEdges(0x100UL)); assert(runtime.timerEdges(0x1e4UL) == 2);
+  runtime.stop(); assert(!runtime.timerEdges(0x1000UL));
+}
+static void feedbackFixture() {
+  fixture(); bytes[3] = '2';
+  memmove(bytes + 56, bytes + 52, size - 52); size += 4;
+  word(4, size); bytes[11] = 1; word(26, 56); word(28, 88); word(30, 106);
+  bytes[52] = 0; bytes[53] = 6; bytes[54] = 7; bytes[55] = 9; // Active-low BUSY on pin8.
+  word(74, 2); bytes[83] = 30; bytes[85] = 1;
+  seal(); assert(image.valid(1024, 1));
+}
+static void testFeedbackValidation() {
+  feedbackFixture(); bytes[3] = '1'; seal(); assert(!image.valid(1024, 1));
+  feedbackFixture(); bytes[55] = 0; seal(); assert(!image.valid(1024, 1)); // End action requires feedback.
+  feedbackFixture(); bytes[55] = 128; seal(); assert(!image.valid(1024, 1));
+  feedbackFixture(); bytes[55] = 1; seal(); assert(!image.valid(1024, 1));
+  feedbackFixture(); bytes[55] = 3; seal(); assert(!image.valid(1024, 1)); // Output collision.
+  feedbackFixture(); bytes[55] = 7; seal(); assert(!image.valid(1024, 1)); // Audio TX collision.
+  feedbackFixture(); bytes[55] = 21; seal(); assert(!image.valid(1024, 1)); // Uno has no A6.
+  bytes[8] = 2; seal(); assert(image.valid(1024, 2));
+  bytes[55] = 128 | 22; seal(); assert(image.valid(1024, 2)); // Nano A7 active-high.
+  bytes[8] = 3; seal(); assert(image.valid(1024, 3)); // Pro Mini ADC pads.
+  bytes[55] = 23; seal(); assert(!image.valid(1024, 3));
+  feedbackFixture(); bytes[84] = 2; seal(); assert(!image.valid(1024, 1)); // Looping audio cannot finish.
+  feedbackFixture(); bytes[85] = 3; seal(); assert(!image.valid(1024, 1)); // Missing target.
+  feedbackFixture(); bytes[85] = 0; bytes[55] = 137; seal(); assert(image.valid(1024, 1)); // Optional monitoring, active-high.
 }
 static void testPackets() {
   uint8_t packet[10];
@@ -208,6 +290,8 @@ static void testPackets() {
 }
 int main(int argc, char** argv) {
   testIntegrity(); testAmbientMixValidation(); testZoneValidation(); testZoneSampling(); testTimeline(); testDebounce(); testPackets();
+  testSceneControlsValidation(); testSceneControlsRuntime();
+  testFeedbackValidation();
   if (argc > 1) {
     FILE* file = nullptr;
 #ifdef _MSC_VER
@@ -219,5 +303,5 @@ int main(int argc, char** argv) {
     assert(size >= 32 && image.valid(bytes[8] == 4 ? 4096 : 1024, bytes[8]));
     puts("Desktop-generated binary passes firmware validation.");
   }
-  puts("Firmware host tests passed: integrity, zone layout/actions, fresh-sample dwell, deadband, gaps, baseline, wrap, pins, timelines, debounce, packets, CRC.");
+  puts("Firmware host tests passed: CPC1/CPC2 integrity, feedback pins, timer/release/round-robin/OFF semantics, zone layout/actions, dwell, wrap, debounce, packets, CRC.");
 }

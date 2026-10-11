@@ -1,4 +1,6 @@
 export * from "./model";
+export * from "./scene-controls";
+export * from "./recording";
 export * from "./ir";
 export * from "./audio-settings";
 export * from "./media-clip";

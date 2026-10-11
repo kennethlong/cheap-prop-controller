@@ -84,6 +84,18 @@ handle("device:ir-cancel", () => {
   available();
   return serial.cancelIr();
 });
+handle("device:output-test-begin", (expectedScene: number[]) => {
+  available();
+  return serial.beginOutputTest(expectedScene);
+});
+handle("device:output-test-set", (mask: number) => {
+  available();
+  return serial.setTestOutputs(mask);
+});
+handle("device:output-test-end", () => {
+  available();
+  return serial.endOutputTest();
+});
 handle("device:command", (command: string) => {
   available();
   return serial.command(command);
