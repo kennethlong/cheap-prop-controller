@@ -38,11 +38,10 @@ class AudioEngine {
     return timerUart::write(players[index].tx, value);
 #endif
   }
-  void command(uint8_t index, uint8_t cmd, uint16_t parameter, uint32_t now) {
+  void command(uint8_t index, uint8_t cmd, uint16_t parameter) {
     packetPlayer = index; packetIndex = 0;
     packetGeneration = players[index].generation;
     packetSize = audioPacket(players[index].kind == 0, cmd, parameter, packet);
-    players[index].nextCommand = now + 60;
   }
   void fade(uint8_t index, uint8_t target, uint16_t duration, uint32_t now, bool preserve) {
     Player& p = players[index];
@@ -114,7 +113,7 @@ class AudioEngine {
     }
   }
   bool readyForFadeThrough() const {
-    if (packetIndex < packetSize) return false;
+    if (packetSize) return false;
 #if !defined(__AVR_ATmega2560__)
     if (timerUart::busy()) return false;
 #elif defined(ARDUINO)
@@ -187,7 +186,7 @@ class AudioEngine {
   }
   bool stopped() const {
     if (fadeThroughPending) return false;
-    if (packetIndex < packetSize) return false;
+    if (packetSize) return false;
 #if !defined(__AVR_ATmega2560__)
     if (timerUart::busy()) return false;
 #elif defined(ARDUINO)
@@ -314,6 +313,14 @@ class AudioEngine {
       }
       return;
     }
+    if (packetSize) {
+      // write() can enqueue bytes on Mega, and Timer2 still owns the last byte
+      // on Uno. Anchor decoder recovery to observed completion on the wire;
+      // USB/status or sensor stalls during a packet must not consume this gap.
+      if (!transportIdle()) return;
+      players[packetPlayer].nextCommand = now + (packet[3] == 0x09 ? 250U : 60U);
+      packetSize = packetIndex = 0;
+    }
     pollFeedbackReady(now);
     if (fadeThroughPending && readyForFadeThrough()) applyFadeThrough(now);
     for (uint8_t n = 0; n < count; ++n) {
@@ -321,17 +328,17 @@ class AudioEngine {
       Player& p = players[i];
       if (!due(now, p.nextCommand)) continue;
       // Initialization does not reset the decoder; only select SD and stop.
-      if (p.stage == 0) { command(i, 0x09, 2, now); p.stage = 1; p.nextCommand = now + 250; return; }
-      if (p.stage == 1) { command(i, 0x16, 0, now); p.stage = p.track ? 3 : 2; return; }
-      if (p.stage == 3) { command(i, 0x06, 0, now); p.sentVolume = 0; p.stage = 4; return; }
-      if (p.stage == 4) { command(i, 0x0f, 0x0100 | p.track, now); p.stage = 5; return; }
-      if (p.stage == 5) { command(i, 0x19, p.loop ? 0 : 1, now); p.stage = 2; p.fadeAt = now; return; }
-      if (p.stage == 7) { command(i, 0x16, 0, now); p.stage = 2; p.track = 0; feedback[i].reset(p.feedbackEnabled); return; }
+      if (p.stage == 0) { command(i, 0x09, 2); p.stage = 1; return; }
+      if (p.stage == 1) { command(i, 0x16, 0); p.stage = p.track ? 3 : 2; return; }
+      if (p.stage == 3) { command(i, 0x06, 0); p.sentVolume = 0; p.stage = 4; return; }
+      if (p.stage == 4) { command(i, 0x0f, 0x0100 | p.track); p.stage = 5; return; }
+      if (p.stage == 5) { command(i, 0x19, p.loop ? 0 : 1); p.stage = 2; p.fadeAt = now; return; }
+      if (p.stage == 7) { command(i, 0x16, 0); p.stage = 2; p.track = 0; feedback[i].reset(p.feedbackEnabled); return; }
       if (!p.track) continue;
       const uint32_t elapsed = now - p.fadeAt;
       p.volume = (!p.fadeMs || elapsed >= p.fadeMs) ? p.target : static_cast<uint8_t>(static_cast<int32_t>(p.from) + (static_cast<int32_t>(p.target) - p.from) * static_cast<int32_t>(elapsed) / p.fadeMs);
-      if (p.sentVolume != p.volume) { command(i, 0x06, p.volume, now); p.sentVolume = p.volume; return; }
-      if (!p.volume && !p.target && !p.preserve) { command(i, 0x16, 0, now); p.track = 0; feedback[i].reset(p.feedbackEnabled); return; }
+      if (p.sentVolume != p.volume) { command(i, 0x06, p.volume); p.sentVolume = p.volume; return; }
+      if (!p.volume && !p.target && !p.preserve) { command(i, 0x16, 0); p.track = 0; feedback[i].reset(p.feedbackEnabled); return; }
     }
   }
 };

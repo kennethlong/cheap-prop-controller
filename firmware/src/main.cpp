@@ -33,6 +33,7 @@ uint32_t outputMask = 0;
 char line[96];
 uint8_t lineLength = 0;
 bool lineOverflow = false;
+uint8_t pendingReports = 0;
 // One ultrasonic transducer at a time, with quiet time to avoid cross-talk.
 uint8_t sonarIndex = 0, sonarPhase = 0;
 uint32_t sonarAt = 0, sonarNext = 0;
@@ -75,14 +76,18 @@ const __FlashStringHelper* feedbackName(uint8_t value) {
   }
 }
 void status(bool hello) {
+  const uint32_t now = millis();
+  engine.updateChildren(now);
   Serial.print(F("{\"type\":\"")); Serial.print(hello ? F("hello") : F("status"));
-  Serial.print(F("\",\"protocol\":1,\"firmware\":\"0.6.0\",\"board\":\"")); Serial.print(boardName());
+  Serial.print(F("\",\"protocol\":1,\"firmware\":\"0.7.2\",\"board\":\"")); Serial.print(boardName());
   Serial.print(F("\",\"capacity\":")); Serial.print(EEPROM.length());
   Serial.print(F(",\"valid\":")); Serial.print(validScene ? F("true") : F("false"));
   Serial.print(F(",\"running\":")); Serial.print(engine.running ? F("true") : F("false"));
   Serial.print(F(",\"state\":")); if (validScene) Serial.print(engine.currentState); else Serial.print(F("null"));
   Serial.print(F(",\"elapsed\":")); Serial.print(engine.running ? millis() - engine.enteredAt : 0);
   Serial.print(F(",\"outputs\":")); Serial.print(outputMask);
+  Serial.print(F(",\"activeChildren\":")); Serial.print(engine.activeChildren());
+  Serial.print(F(",\"coolingChildren\":")); Serial.print(engine.coolingChildren());
   Serial.print(F(",\"testingOutputs\":")); Serial.print(testingOutputs ? F("true") : F("false"));
   Serial.print(F(",\"players\":["));
   for (uint8_t i = 0; validScene && i < image.b(11); ++i) {
@@ -92,7 +97,15 @@ void status(bool hello) {
     if (image.b(image.player(i) + 3)) Serial.print(busyLevels[i] ? F("true") : F("false")); else Serial.print(F("null"));
     Serial.print('}');
   }
-  Serial.println(F("],\"sceneControls\":true,\"outputTest\":true,\"audioFeedback\":true,\"audioFadeThrough\":true,\"audioAmbientMix\":true,\"distanceZones\":true,\"irLearning\":true,\"irReplay\":true}"));
+  Serial.println(F("],\"sceneControls\":true,\"parallelChildren\":true,\"manualTriggers\":true,\"outputTest\":true,\"audioFeedback\":true,\"audioFadeThrough\":true,\"audioAmbientMix\":true,\"distanceZones\":true,\"irLearning\":true,\"irReplay\":true}"));
+}
+void reportPending() {
+  // Long USB reports must not interrupt a polled echo or split an MP3 packet.
+  // Requests remain parseable while reports wait, including priority STOP.
+  if (!pendingReports || sonarPhase || !audio.transportIdle() || ir.transmitting()) return;
+  const uint8_t reports = pendingReports; pendingReports = 0;
+  if (reports & 1) status(false);
+  if (reports & 2) status(true);
 }
 void stateChanged(uint32_t now) {
   // Use the state/action timestamp, even if serial logging crosses a millis
@@ -130,7 +143,7 @@ void resetZones() {
 void resetInputBaselines(uint32_t now) {
   for (uint8_t i = 0; i < image.b(10); ++i) {
     const uint16_t p = image.trigger(i);
-    if (image.b(p) == 3) continue;
+    if (image.b(p) >= 3) continue;
     sensorActive[i] = image.b(p) == 2 || (static_cast<bool>(digitalRead(image.b(p + 1))) ^ static_cast<bool>(image.b(p + 3) & 1));
     inputs[i].reset(sensorActive[i], now);
   }
@@ -148,7 +161,7 @@ void setupScene() {
   }
   for (uint8_t i = 0; i < image.b(10); ++i) {
     const uint16_t p = image.trigger(i);
-    if (image.b(p) == 3) continue;
+    if (image.b(p) >= 3) continue;
     if (image.b(p) == 2) {
       digitalWrite(image.b(p + 1), LOW); pinMode(image.b(p + 1), OUTPUT);
       pinMode(image.b(p + 2), INPUT);
@@ -194,7 +207,7 @@ void updateSonar() {
   if (!validScene || !engine.running || !image.b(10) || ir.transmitting()) return;
   const uint32_t now = micros();
   if (!sonarPhase) {
-    if (static_cast<int32_t>(now - sonarNext) < 0) return;
+    if (static_cast<int32_t>(now - sonarNext) < 0 || !audio.transportIdle()) return;
     bool found = false;
     for (uint8_t n = 0; n < image.b(10); ++n) {
       if (image.b(image.trigger(sonarIndex)) == 2) { found = true; break; }
@@ -220,7 +233,7 @@ uint8_t readTriggerEdges(uint32_t now, uint8_t& releases) {
   releases = 0;
   for (uint8_t i = 0; i < image.b(10); ++i) {
     const uint16_t p = image.trigger(i);
-    if (image.b(p) == 3 || (zoneSensorMask & (1 << i))) continue;
+    if (image.b(p) >= 3 || (zoneSensorMask & (1 << i))) continue;
     if (image.b(p) != 2)
       sensorActive[i] = static_cast<bool>(digitalRead(image.b(p + 1))) ^ static_cast<bool>(image.b(p + 3) & 1);
     const uint8_t edge = inputs[i].updateEdges(sensorActive[i], now, image.b(p + 7) * 50U);
@@ -267,8 +280,8 @@ void command() {
   while (token && count < 6) { args[count++] = token; token = strtok(nullptr, " "); }
   if (!count) return;
   if (token) { error(F("Too many arguments")); return; }
-  if (!strcmp(args[0], "HELLO") && count == 1) { status(true); return; }
-  if (!strcmp(args[0], "STATUS") && count == 1) { status(false); return; }
+  if (!strcmp(args[0], "HELLO") && count == 1) { pendingReports |= 2; reportPending(); return; }
+  if (!strcmp(args[0], "STATUS") && count == 1) { pendingReports |= 1; reportPending(); return; }
   if (!strcmp(args[0], "STOP") && count == 1) { stop(); ack(F("STOP")); return; }
   uint32_t value = 0, second = 0;
   if (!strcmp(args[0], "TESTBEGIN") && count == 3) {
@@ -282,12 +295,12 @@ void command() {
   }
   if (testingOutputs) { error(F("Send STOP to exit output test first")); return; }
   if (!strcmp(args[0], "IRLEARN") && count == 1) {
-    if (!validScene || uploading || !image.hasIr()) { error(F("Upload an IR-enabled scene before learning")); return; }
+    if (!validScene || uploading || !image.hasIr()) { error(F("Upload an IR-enabled scene first")); return; }
     if (ir.busy() && !engine.running) { error(F("IR busy; send STOP first")); return; }
     stop(); ir.learn(millis()); return; // One final capture/error response, no early ACK.
   }
   if (!strcmp(args[0], "IRBEGIN") && count == 6) {
-    if (!validScene || uploading || !image.hasIr()) { error(F("Upload an IR-enabled scene before testing")); return; }
+    if (!validScene || uploading || !image.hasIr()) { error(F("Upload an IR-enabled scene first")); return; }
     if (ir.busy() && !engine.running) { error(F("IR busy; send STOP first")); return; }
     uint32_t kind, pulses, repeats, gap, code;
     if (!number(args[1], 1, kind) || !number(args[2], 127, pulses) || !number(args[3], 10, repeats) || !number(args[4], 2000, gap) || !number(args[5], 0xffffffffUL, code)
@@ -312,7 +325,7 @@ void command() {
   }
   if ((!strcmp(args[0], "RUN") || !strcmp(args[0], "RESET")) && count == 1) {
     if (!validScene || uploading) { error(F("No valid scene")); return; }
-    if (!engine.running && ir.busy()) { error(F("Finish IR training or send STOP first")); return; }
+    if (!engine.running && ir.busy()) { error(F("IR busy; send STOP first")); return; }
     const uint32_t now = millis();
     resetZones(); resetInputBaselines(now); engine.run(now); writeOutputs(engine.activeOutputs(now), true); stateChanged(now);
     ack(!strcmp(args[0], "RUN") ? F("RUN") : F("RESET")); return;
@@ -322,7 +335,9 @@ void command() {
     if (zoneSensorMask & (1 << value)) { error(F("Distance zones require a sensor reading")); return; }
     const uint32_t now = millis();
     engine.resetExternalTimers(now);
-    if (engine.trigger(1 << value, now)) { writeOutputs(engine.activeOutputs(now), true); stateChanged(now); }
+    const bool changed = engine.trigger(1 << value, now);
+    writeOutputs(engine.activeOutputs(now), true);
+    if (changed) stateChanged(now);
     ack(F("TRIGGER")); return;
   }
   if (!strcmp(args[0], "BEGIN") && count == 3) {
@@ -344,7 +359,7 @@ void command() {
       if (high < 0 || low < 0) { error(F("Invalid DATA hex")); return; }
       bytes[i] = (high << 4) | low;
       if (receivedLength + i < 3 && bytes[i] != static_cast<uint8_t>("CPC"[receivedLength + i])) { error(F("Invalid image magic")); return; }
-      if (receivedLength + i == 3 && bytes[i] != '1' && bytes[i] != '2') { error(F("Invalid image version")); return; }
+      if (receivedLength + i == 3 && (bytes[i] < '1' || bytes[i] > '3')) { error(F("Invalid image version")); return; }
     }
     for (uint8_t i = 0; i < characters / 2; ++i)
       if (receivedLength + i >= 4) EEPROM.update(receivedLength + i, bytes[i]);
@@ -388,6 +403,8 @@ void setup() {
 void loop() {
   expireOutputTest(millis());
   serialInput();
+  // Report before starting another ping, then refresh the scene/audio clock.
+  reportPending();
   const uint32_t now = millis();
   ir.update(now, audio.transportIdle(), sonarPhase == 0);
   if (validScene) {

@@ -19,6 +19,13 @@ const api: DesktopAPI = {
   openProject: () => ipcRenderer.invoke("project:open"),
   saveProject: (project, saveAs) =>
     ipcRenderer.invoke("project:save", project, saveAs),
+  listWiringConfigurations: () => ipcRenderer.invoke("wiring:list"),
+  saveWiringConfiguration: (configuration) =>
+    ipcRenderer.invoke("wiring:save", configuration),
+  deleteWiringConfiguration: (id) => ipcRenderer.invoke("wiring:delete", id),
+  importWiringConfiguration: () => ipcRenderer.invoke("wiring:import"),
+  exportWiringConfiguration: (configuration) =>
+    ipcRenderer.invoke("wiring:export", configuration),
   importAudio: (number) => ipcRenderer.invoke("media:import", number),
   readAudio: (path) => ipcRenderer.invoke("media:read", path),
   saveTrimmedAudio: (track) => ipcRenderer.invoke("media:save-trimmed", track),

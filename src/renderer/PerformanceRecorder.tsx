@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { SceneProject, SceneState, TimelineEvent } from "../shared";
+import { childOutputOwners } from "../shared";
 import { applyRecording, quantizeRecordedInterval } from "../shared/recording";
 import { PreviewAudio } from "./audio";
 import { time } from "./Timeline";
@@ -19,8 +20,16 @@ export function PerformanceRecorder({
   onApply(events: TimelineEvent[]): void;
   onClose(): void;
 }) {
+  const owners = childOutputOwners(project);
   const [armed, setArmed] = useState(
-    () => new Set(project.outputs.map((output) => output.id)),
+    () =>
+      new Set(
+        project.outputs
+          .filter(
+            (output) => output.enabled !== false && !owners.has(output.id),
+          )
+          .map((output) => output.id),
+      ),
   );
   const [values, setValues] = useState<Record<string, boolean>>({});
   const [phase, setPhase] = useState<"setup" | "recording" | "review">("setup");
@@ -61,7 +70,7 @@ export function PerformanceRecorder({
     setHeld(new Set(down.current.keys()));
   };
   const press = (id: string, source: string) => {
-    if (!running.current || !armed.has(id)) return;
+    if (!running.current || !armed.has(id) || owners.has(id)) return;
     const current = down.current.get(id);
     if (current) current.sources.add(source);
     else
@@ -247,13 +256,25 @@ export function PerformanceRecorder({
         />
         <div className="record-lanes">
           {project.outputs.map((output, index) => (
-            <div className="record-lane" key={output.id}>
+            <div
+              className="record-lane"
+              key={output.id}
+              title={
+                owners.has(output.id)
+                  ? `Reserved for child: ${owners.get(output.id)!.name}`
+                  : undefined
+              }
+            >
               <label className="check">
                 <input
                   aria-label={`Record ${output.name}`}
                   type="checkbox"
                   checked={armed.has(output.id)}
-                  disabled={phase !== "setup"}
+                  disabled={
+                    phase !== "setup" ||
+                    output.enabled === false ||
+                    owners.has(output.id)
+                  }
                   onChange={(event) =>
                     setArmed((old) => {
                       const next = new Set(old);
@@ -264,11 +285,24 @@ export function PerformanceRecorder({
                   }
                 />
                 {output.name}
+                {output.enabled === false && (
+                  <span className="hint"> · Disabled</span>
+                )}
+                {owners.has(output.id) && (
+                  <span className="hint">
+                    {" "}
+                    · Child: {owners.get(output.id)!.name}
+                  </span>
+                )}
               </label>
               <select
                 aria-label={`${output.name} recorded value`}
                 value={(values[output.id] ?? true) ? "on" : "off"}
-                disabled={phase !== "setup"}
+                disabled={
+                  phase !== "setup" ||
+                  output.enabled === false ||
+                  owners.has(output.id)
+                }
                 onChange={(event) =>
                   setValues((old) => ({
                     ...old,

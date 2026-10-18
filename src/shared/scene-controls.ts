@@ -1,4 +1,5 @@
 import type { SceneProject, StateTransition, TriggerConfig } from "./model";
+import { usesParallelChildren } from "./parallel-children";
 
 export function transitionTargets(transition: StateTransition): string[] {
   return [transition.targetStateId, ...(transition.alternateStateIds ?? [])];
@@ -11,7 +12,10 @@ export function timerInterval(trigger: TriggerConfig): number {
 /** CPC1 images remain byte-for-byte unchanged until a new control is used. */
 export function usesSceneControls(project: SceneProject): boolean {
   return (
-    project.triggers.some((trigger) => trigger.kind === "timer") ||
+    usesParallelChildren(project) ||
+    project.triggers.some(
+      (trigger) => trigger.kind === "timer" || trigger.kind === "manual",
+    ) ||
     project.audio.players.some((player) => player.feedback !== undefined) ||
     project.states.some(
       (state) =>

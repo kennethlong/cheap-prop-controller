@@ -4,6 +4,7 @@ import type {
   IrSignal,
   MediaTrack,
   SceneProject,
+  WiringConfiguration,
 } from "./shared/model";
 export interface PortInfo {
   path: string;
@@ -46,6 +47,15 @@ export interface DesktopAPI {
     project: SceneProject,
     saveAs?: boolean,
   ): Promise<ProjectFile | null>;
+  listWiringConfigurations?(): Promise<WiringConfiguration[]>;
+  saveWiringConfiguration?(
+    configuration: WiringConfiguration,
+  ): Promise<WiringConfiguration>;
+  deleteWiringConfiguration?(id: string): Promise<void>;
+  importWiringConfiguration?(): Promise<WiringConfiguration | null>;
+  exportWiringConfiguration?(
+    configuration: WiringConfiguration,
+  ): Promise<string | null>;
   importAudio(trackNumber: number): Promise<MediaTrack | null>;
   readAudio(path: string): Promise<{ dataUrl: string }>;
   saveTrimmedAudio(

@@ -6,6 +6,9 @@ import type {
 } from "./model";
 import { LIMITS } from "./model";
 import { resolveAudioTransition } from "./audio-settings";
+import { isChildState } from "./parallel-children";
+import { allocateStandardHarness } from "./standard-harness";
+import { allocateFixedPins } from "./wiring-configurations";
 
 const pins = (last: number) =>
   Array.from({ length: last + 1 }, (_, index) => index);
@@ -72,6 +75,9 @@ export interface AllocationResult {
 
 /** Reserve fixed shield/IR pins, then audio, triggers, and ordinary outputs. */
 export function allocatePins(project: SceneProject): AllocationResult {
+  if (project.wiring === "fixed") return allocateFixedPins(project);
+  if (project.wiring === "standard-uno")
+    return allocateStandardHarness(project);
   const result = structuredClone(project);
   const profile = BOARD_PROFILES[result.board];
   const used = new Set(profile.reservedPins);
@@ -137,7 +143,7 @@ export function allocatePins(project: SceneProject): AllocationResult {
       });
   });
   result.triggers.forEach((trigger, index) => {
-    if (trigger.kind === "timer") {
+    if (trigger.kind === "timer" || trigger.kind === "manual") {
       trigger.pin = trigger.echoPin = null;
       return;
     }
@@ -169,7 +175,9 @@ export function requiredPlayerCount(project: SceneProject): number {
     project.states
       .filter(
         (state) =>
-          state.id !== project.initialStateId && state.foregroundTrack !== null,
+          !isChildState(state) &&
+          state.id !== project.initialStateId &&
+          state.foregroundTrack !== null,
       )
       .map((state) => state.foregroundTrack),
   );
@@ -184,7 +192,18 @@ export function requiredPlayerCount(project: SceneProject): number {
 
 export function synchronizeAudioPlayers(project: SceneProject): SceneProject {
   const result = structuredClone(project);
+  if (result.wiring === "fixed") return allocateFixedPins(result).project;
   const count = requiredPlayerCount(result);
+  if (result.wiring === "standard-uno") {
+    if (count > 0 && result.audio.players.length === 0)
+      result.audio.players.push({
+        id: "player-1",
+        kind: "dfplayer",
+        txPin: 3,
+        rxPin: 8,
+      });
+    return allocatePins(result).project;
+  }
   result.audio.players = Array.from(
     { length: count },
     (_, index) =>

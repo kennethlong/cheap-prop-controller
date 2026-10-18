@@ -252,6 +252,28 @@ static void testSceneControlsRuntime() {
   runtime.run(0xfffffff0UL); assert(!runtime.timerEdges(0x100UL)); assert(runtime.timerEdges(0x1e4UL) == 2);
   runtime.stop(); assert(!runtime.timerEdges(0x1000UL));
 }
+static void manualFixture() {
+  fixture(); bytes[3] = '2';
+  memset(bytes + image.trigger(1), 0, 8);
+  bytes[44] = 4; bytes[45] = bytes[46] = 255;
+  seal(); assert(image.valid(1024, 1));
+}
+static void testManualTriggers() {
+  manualFixture(); bytes[3] = '1'; seal(); assert(!image.valid(1024, 1));
+  manualFixture(); bytes[3] = '3'; seal(); assert(image.valid(1024, 1));
+  for (uint8_t field = 1; field < 8; ++field) {
+    manualFixture(); bytes[44 + field] = field < 3 ? 254 : 1;
+    seal(); assert(!image.valid(1024, 1)); // Every reserved setting must be absent.
+  }
+  manualFixture(); bytes[44] = 5; seal(); assert(!image.valid(1024, 1));
+  manualFixture(); bytes[104] |= 128; seal(); assert(!image.valid(1024, 1)); // App triggers cannot release.
+  manualFixture(); cpc::SceneRuntime runtime; runtime.begin(&image); runtime.run(0);
+  assert(!runtime.timerEdges(0) && !runtime.timerEdges(500) && !runtime.timerEdges(0xffffffffUL));
+  assert(runtime.currentState == 0 && !runtime.busyChildren);
+  assert(runtime.trigger(1, 100) && runtime.currentState == 1);
+  assert(runtime.trigger(2, 200) && runtime.currentState == 0); // Explicit injection only.
+  runtime.stop(); assert(!runtime.trigger(2, 300));
+}
 static void feedbackFixture() {
   fixture(); bytes[3] = '2';
   memmove(bytes + 56, bytes + 52, size - 52); size += 4;
@@ -290,7 +312,7 @@ static void testPackets() {
 }
 int main(int argc, char** argv) {
   testIntegrity(); testAmbientMixValidation(); testZoneValidation(); testZoneSampling(); testTimeline(); testDebounce(); testPackets();
-  testSceneControlsValidation(); testSceneControlsRuntime();
+  testSceneControlsValidation(); testSceneControlsRuntime(); testManualTriggers();
   testFeedbackValidation();
   if (argc > 1) {
     FILE* file = nullptr;
@@ -303,5 +325,5 @@ int main(int argc, char** argv) {
     assert(size >= 32 && image.valid(bytes[8] == 4 ? 4096 : 1024, bytes[8]));
     puts("Desktop-generated binary passes firmware validation.");
   }
-  puts("Firmware host tests passed: CPC1/CPC2 integrity, feedback pins, timer/release/round-robin/OFF semantics, zone layout/actions, dwell, wrap, debounce, packets, CRC.");
+  puts("Firmware host tests passed: CPC1/CPC2 integrity, feedback pins, manual trigger validation/injection, timer/release/round-robin/OFF semantics, zone layout/actions, dwell, wrap, debounce, packets, CRC.");
 }

@@ -307,3 +307,38 @@ avrdude.conf
 OctoBanger.exe
 A39A4121158EED1A7D0E18E898F3F44430673A196E219AB3517E28E0702DD660
 ```
+
+## PIR reliability comparison - October 12, 2026
+
+Inspected the installed OctoBanger source, the local SyncSix sketches, and our current firmware and bench project. These findings establish software behavior, not a measured cause of the reported missed detections. No firmware was flashed, no trigger was sent, and the scene was not changed. A read-only COM6 STATUS snapshot reported firmware 0.7.1, valid scene, running false, state 2, and all outputs off. This snapshot does not establish the controller state during earlier failed tests. Firmware 0.7.2's separate sonar/audio arbitration fix remains prepared but not installed.
+
+| Behavior | OctoBanger TTL | SyncSix V1.1 | Cheap Prop Controller/current bench |
+| --- | --- | --- | --- |
+| Detection | Current active input level | Current active input level | Debounced inactive-to-active change |
+| PIR electrical mode | Idle LOW / active HIGH, plain INPUT, no internal pull-up | Standard trigger is active LOW through a 74HC165; external conditioning cannot be established without its schematic | D9, active HIGH, plain INPUT, no internal pull-up |
+| Input filtering | Two reads 5 ms apart; active-HIGH accepts either HIGH, despite a comment implying both must agree | No debounce on standard trigger | 100 ms stable activation and release in this project |
+| Already active at startup/reset | Active startup postpones acceptance for 30 seconds, then the current level can trigger | Active level can trigger after ordinary initialization | Samples the current level; an already-active input must go inactive and activate again |
+| During playback | Blocking playback; input not sampled | Blocking playback; input not sampled | Inputs keep updating; only mappings belonging to the current main state act |
+| Still active when back at idle | Can replay after the configured reset delay (default 30 seconds) | Can replay on the next idle check | Does not replay solely because the input is still active |
+| Sensor warmup | Configurable boot delay, default zero; separate active-startup guard | No dedicated PIR warmup | No dedicated warmup interval; held-input startup suppression does not suppress later warmup pulses |
+
+Source locations: OctoBanger's [input configuration](C:/octobanger/Hex/src/OctoBanger_TTL.ino:161), [trigger reads](C:/octobanger/Hex/src/OctoBanger_TTL.ino:173), [startup guard](C:/octobanger/Hex/src/OctoBanger_TTL.ino:107), and [playback/cooldown](C:/octobanger/Hex/src/OctoBanger_TTL.ino:370); SyncSix's [main loop](C:/Code/SyncSix/SyncSix_V1.1.ino:87), [blocking playback](C:/Code/SyncSix/SyncSix_V1.1.ino:146), and [trigger bit](C:/Code/SyncSix/SyncSix_V1.1.ino:333); our [debouncer](../../firmware/include/primitives.hpp:13), [baseline initialization](../../firmware/src/main.cpp:143), [input polling](../../firmware/src/main.cpp:231), and [state-specific dispatch](../../firmware/include/scene_image.hpp:276).
+
+In the saved bench, PIR only maps Ambient to Approach. It intentionally has no action in Approach or Scare. Returning to Ambient does not synthesize a new edge from an already-HIGH PIR; Arm/reset while HIGH also waits for a real release. A STOPped controller ignores scene triggers. These conditions can look like missed motion without implying a sensor or debounce fault. No direct raw-input telemetry is currently available to identify which condition occurred in the reported test.
+
+### SyncSix's 3.3 V variant
+
+[SyncSix_3V3Trigger.ino](C:/Code/SyncSix/SyncSix_3V3Trigger.ino:2) replaces ultrasonic sensing with a voltage-sensitive input on A2. It uses a plain input and asserts a trigger when analogRead exceeds its threshold. This is voltage detection, not PIR sensitivity adjustment. The code declares a 2.7 V threshold, but passes it to Arduino's integer map() at line 52: 2.7 becomes 2, giving threshold 409 and acceptance at ADC count 410 or higher, approximately 2.0 V with a 5 V reference. The [installed Arduino implementation](C:/Users/kenne/.platformio/packages/framework-arduino-avr/cores/arduino/WMath.cpp:52) takes integer long arguments. The configurable analog-threshold idea is useful; that conversion should not be copied.
+
+A 5 V ATmega328P digital input is specified to recognize HIGH at 0.6 times VCC, or 3.0 V. A normal approximately 3.3 V PIR output should meet that requirement, but an actual LOW/HIGH voltage measurement at the Uno would distinguish a marginal signal from state/rearm behavior. Sources: [Microchip datasheet, DC characteristics](https://ww1.microchip.com/downloads/en/DeviceDoc/Atmel-7810-Automotive-Microcontrollers-ATmega328P_Datasheet.pdf#page=258), [Adafruit PIR testing](https://learn.adafruit.com/pir-passive-infrared-proximity-motion-sensor/testing-a-pir). Analog threshold sensing cannot be enabled on the current D9 wiring; it would require an analog-capable input and a supported allocation/configuration change.
+
+### Applicable improvements and diagnostic order
+
+1. Expose raw HIGH/LOW, debounced activity, waiting-for-release status, controller running/current state, and whether that state has a mapping for the input. Log accepted and ignored activations with a reason. This separates a missing electrical signal from an intentional software gate.
+2. Preserve fresh-activation behavior as the default; the user explicitly preferred one-shot scene behavior. An optional active-level-on-entry/retrigger policy would be a deliberate behavior change, not a sensitivity fix.
+3. Consider configurable startup settling and explicit readiness. PIR modules can take 30-60 seconds to settle, and the hardware hold time/jumper can keep the output HIGH despite additional movement ([Adafruit testing guide](https://learn.adafruit.com/pir-passive-infrared-proximity-motion-sensor/testing-a-pir)). Do not treat generic pot rotation guidance as authoritative for this user's particular HiLetgo layout.
+4. If measured HIGH voltage is marginal, investigate supply/common-ground/wiring or add properly calibrated analog thresholds with hysteresis. There is no evidence yet that reducing the current 100 ms debounce improves detection: normal PIR pulses last much longer.
+
+No dedicated PIR sensitivity algorithm was found in either legacy firmware. SyncSix's BUSY-based suppression near audio completion applies specifically to its ultrasonic path; it is not a PIR reliability mechanism.
+
+The user clarified that the symptom is missed walk-ins. The next discriminating observation is the PIR OUT voltage before and during an apparent miss, with the controller STOPped so the sensor can be evaluated without scene outputs: remaining LOW suggests the module did not detect motion; remaining HIGH means no new edge occurred; a fresh sustained LOW-to-HIGH transition shifts investigation to input recognition and scene readiness. Motion across the lens can be compared with a direct approach. No physical measurements have yet established which case applies.

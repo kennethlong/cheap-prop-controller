@@ -6,7 +6,10 @@ import {
   type ZoneAction,
 } from "./model";
 import { parseProject, validateProject } from "./validation";
+import { toRuntimeProject } from "./standard-harness";
 import { getMediaClip } from "./media-clip";
+import { expandIrEvents } from "./ir-macros";
+import { childOutputOwners, isChildState } from "./parallel-children";
 import {
   resolveAmbientMixVolume,
   resolveAudioTransition,
@@ -40,6 +43,13 @@ export interface SimulatorSnapshot {
   ambientTrack: number | null;
   audio: AudioVoice[];
   irActivity: IrActivity[];
+  children: Array<{
+    id: string;
+    name: string;
+    phase: "running" | "cooldown";
+    elapsedMs: number;
+    remainingMs: number;
+  }>;
   distances: Record<
     string,
     {
@@ -106,9 +116,12 @@ export class SceneSimulator {
   private readonly roundRobin = new Map<string, number>();
   private readonly inputs = new Map<string, InputState>();
   private readonly distances = new Map<string, DistanceState>();
+  private readonly childStarted = new Map<string, number>();
+  private readonly outputOwners: Map<string, SceneState>;
 
   constructor(project: SceneProject) {
-    this.project = parseProject(project);
+    this.project = toRuntimeProject(parseProject(project));
+    this.outputOwners = childOutputOwners(this.project);
     const errors = validateProject(project).filter(
       (issue) => issue.severity === "error",
     );
@@ -164,7 +177,12 @@ export class SceneSimulator {
       const rising = new Set<string>();
       const falling = new Set<string>();
       this.project.triggers.forEach((trigger) => {
-        if (isZonedTrigger(trigger) || trigger.kind === "timer") return;
+        if (
+          isZonedTrigger(trigger) ||
+          trigger.kind === "timer" ||
+          trigger.kind === "manual"
+        )
+          return;
         const input = this.inputs.get(trigger.id)!;
         if (
           input.raw !== input.stable &&
@@ -228,7 +246,12 @@ export class SceneSimulator {
   /** Inject a clean release edge for preview; physical inputs use setTrigger. */
   release(triggerId: string): boolean {
     const trigger = this.project.triggers.find((item) => item.id === triggerId);
-    if (!trigger || trigger.kind === "timer" || isZonedTrigger(trigger))
+    if (
+      !trigger ||
+      trigger.kind === "timer" ||
+      trigger.kind === "manual" ||
+      isZonedTrigger(trigger)
+    )
       return false;
     return this.applyTriggers(new Set(), new Set([triggerId]));
   }
@@ -260,16 +283,16 @@ export class SceneSimulator {
   setTrigger(triggerId: string, active: boolean): void {
     const input = this.inputs.get(triggerId);
     if (!input) throw new Error(`Unknown trigger: ${triggerId}`);
-    if (
-      this.project.triggers.find((item) => item.id === triggerId)?.kind ===
-      "timer"
-    )
+    const trigger = this.project.triggers.find(
+      (item) => item.id === triggerId,
+    )!;
+    if (trigger.kind === "timer")
       throw new Error("Timer inputs advance automatically.");
-    if (
-      isZonedTrigger(
-        this.project.triggers.find((item) => item.id === triggerId)!,
-      )
-    )
+    if (trigger.kind === "manual")
+      throw new Error(
+        "Manual triggers use the preview trigger button, not a physical input.",
+      );
+    if (isZonedTrigger(trigger))
       throw new Error("Use a distance reading to preview an ultrasonic zone.");
     if (input.raw !== active) {
       input.raw = active;
@@ -314,6 +337,7 @@ export class SceneSimulator {
     this.remainder = 0;
     this.irActivity = [];
     this.roundRobin.clear();
+    this.childStarted.clear();
     this.restartTimers(false);
     this.inputs.forEach((input) => {
       input.stable = input.raw;
@@ -339,6 +363,7 @@ export class SceneSimulator {
     this.running = false;
     this.pendingAudio = null;
     this.voices = [];
+    this.childStarted.clear();
     this.distances.forEach((distance) => {
       distance.candidateSince = null;
     });
@@ -347,6 +372,7 @@ export class SceneSimulator {
 
   snapshot(): SimulatorSnapshot {
     this.refreshVoices();
+    this.expireChildren();
     const outputs: Record<string, boolean> = Object.create(null) as Record<
       string,
       boolean
@@ -355,11 +381,21 @@ export class SceneSimulator {
       null,
     ) as Record<string, boolean>;
     this.project.outputs.forEach((output) => {
-      const interval = this.current.events.find(
+      const owner = this.outputOwners.get(output.id);
+      const startedAt = owner ? this.childStarted.get(owner.id) : undefined;
+      const elapsed = owner
+        ? this.total - (startedAt ?? this.total)
+        : this.elapsed;
+      const events = owner
+        ? startedAt !== undefined && elapsed < owner.durationMs
+          ? owner.events
+          : []
+        : this.current.events;
+      const interval = events.find(
         (event) =>
           event.outputId === output.id &&
-          this.elapsed >= event.startMs &&
-          this.elapsed < event.endMs,
+          elapsed >= event.startMs &&
+          elapsed < event.endMs,
       );
       const active =
         this.running &&
@@ -391,6 +427,24 @@ export class SceneSimulator {
         }),
       ),
       irActivity: this.irActivity.map((entry) => ({ ...entry })),
+      children: this.project.states.flatMap((state) => {
+        const startedAt = this.childStarted.get(state.id);
+        if (startedAt === undefined) return [];
+        const elapsedMs = this.total - startedAt;
+        const running = elapsedMs < state.durationMs;
+        return [
+          {
+            id: state.id,
+            name: state.name,
+            phase: running ? ("running" as const) : ("cooldown" as const),
+            elapsedMs,
+            remainingMs:
+              state.durationMs +
+              (running ? 0 : (state.cooldownMs ?? 0)) -
+              elapsedMs,
+          },
+        ];
+      }),
       distances: Object.fromEntries(
         this.project.triggers
           .filter((trigger) => trigger.kind === "ultrasonic")
@@ -419,21 +473,50 @@ export class SceneSimulator {
   ): boolean {
     if (!this.running || (rising.size === 0 && falling.size === 0))
       return false;
-    const transition = this.current.transitions.find((candidate) =>
-      (candidate.edge === "release" ? falling : rising).has(
-        candidate.triggerId,
-      ),
-    );
-    if (!transition) return false;
-    const targets = [
-      transition.targetStateId,
-      ...(transition.alternateStateIds ?? []),
-    ];
-    const key = `${this.current.id}\0${transition.triggerId}\0${transition.edge ?? "activate"}`;
-    const next = this.roundRobin.get(key) ?? 0;
-    this.roundRobin.set(key, (next + 1) % targets.length);
-    this.enter(targets[next % targets.length]);
-    return true;
+    this.expireChildren();
+    // All edges use the mappings of the original parent, even when a main
+    // transition appears before a child launch in the same polling iteration.
+    let mainTarget: string | undefined;
+    let launched = false;
+    for (const transition of this.current.transitions) {
+      if (
+        !(transition.edge === "release" ? falling : rising).has(
+          transition.triggerId,
+        )
+      )
+        continue;
+      const target = this.project.states.find(
+        (state) => state.id === transition.targetStateId,
+      )!;
+      if (isChildState(target)) {
+        if (!this.childStarted.has(target.id)) {
+          this.childStarted.set(target.id, this.total);
+          launched = true;
+        }
+      } else if (mainTarget === undefined) {
+        const targets = [
+          transition.targetStateId,
+          ...(transition.alternateStateIds ?? []),
+        ];
+        const key = `${this.current.id}\0${transition.triggerId}\0${transition.edge ?? "activate"}`;
+        const next = this.roundRobin.get(key) ?? 0;
+        this.roundRobin.set(key, (next + 1) % targets.length);
+        mainTarget = targets[next % targets.length];
+      }
+    }
+    if (mainTarget !== undefined) this.enter(mainTarget);
+    return launched || mainTarget !== undefined;
+  }
+
+  private expireChildren(): void {
+    for (const state of this.project.states) {
+      const startedAt = this.childStarted.get(state.id);
+      if (
+        startedAt !== undefined &&
+        this.total - startedAt >= state.durationMs + (state.cooldownMs ?? 0)
+      )
+        this.childStarted.delete(state.id);
+    }
   }
 
   private restartTimers(externalOnly: boolean): void {
@@ -491,9 +574,7 @@ export class SceneSimulator {
   }
 
   private fireTimelineIr(afterMs: number, throughMs: number): void {
-    for (const event of [...(this.current.irEvents ?? [])].sort(
-      (a, b) => a.atMs - b.atMs,
-    ))
+    for (const event of expandIrEvents(this.project, this.current))
       if (event.atMs > afterMs && event.atMs <= throughMs)
         this.recordIr(event.commandId, "timeline");
   }

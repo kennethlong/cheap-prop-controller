@@ -10,10 +10,18 @@ import { pathToFileURL } from "node:url";
 import { SerialService } from "./serial-service";
 import { ProjectStore } from "./project-store";
 import { ProjectFolder } from "./project-folder";
+import {
+  checkedWiringConfiguration,
+  WiringConfigurationStore,
+} from "./wiring-configuration-store";
 import { flashFirmware } from "./firmware";
 import type { BoardId, IrCommand, MediaTrack } from "../shared/model";
 
 const serial = new SerialService();
+const wiringConfigurations = new WiringConfigurationStore(
+  process.env.CPC_TEST_WIRING_CONFIGURATIONS_FILE ??
+    path.join(app.getPath("userData"), "wiring-configurations.json"),
+);
 const projectFolder = new ProjectFolder(
   process.env.CPC_TEST_SETTINGS_FILE ??
     path.join(app.getPath("userData"), "project-folder.json"),
@@ -149,6 +157,44 @@ handle("project:save", async (project: unknown, saveAs = false) => {
   const saved = await projects.save(project, filename);
   await projectFolder.remember(saved.path);
   return saved;
+});
+handle("wiring:list", () => wiringConfigurations.list());
+handle("wiring:save", (configuration: unknown) =>
+  wiringConfigurations.save(configuration),
+);
+handle("wiring:delete", (id: unknown) => wiringConfigurations.delete(id));
+handle("wiring:import", async () => {
+  const result = await dialog.showOpenDialog(window!, {
+    title: "Import wiring configuration",
+    defaultPath: await projectFolder.get(projects.currentPath),
+    properties: ["openFile"],
+    filters: [
+      { name: "Controller wiring configuration", extensions: ["json"] },
+    ],
+  });
+  if (result.canceled || !result.filePaths[0]) return null;
+  return wiringConfigurations.importFile(result.filePaths[0]);
+});
+handle("wiring:export", async (value: unknown) => {
+  const configuration = checkedWiringConfiguration(value);
+  const basename =
+    configuration.name
+      .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
+      .replace(/[. ]+$/g, "")
+      .slice(0, 80) || "Wiring configuration";
+  const result = await dialog.showSaveDialog(window!, {
+    title: "Export wiring configuration",
+    defaultPath: path.join(
+      await projectFolder.get(projects.currentPath),
+      `${basename}.cpc-wiring.json`,
+    ),
+    filters: [
+      { name: "Controller wiring configuration", extensions: ["json"] },
+    ],
+  });
+  if (result.canceled || !result.filePath) return null;
+  // Keep the exact path approved by the native overwrite confirmation.
+  return wiringConfigurations.exportFile(configuration, result.filePath);
 });
 handle("media:import", async (number: number) => {
   if (!Number.isInteger(number) || number < 1 || number > 255)

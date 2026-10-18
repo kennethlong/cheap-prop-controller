@@ -19,10 +19,19 @@ import {
 import { createTrigger, OUTPUT_COLORS } from "../shared/defaults";
 import { isZonedTrigger, LIMITS } from "../shared/model";
 import type { SceneProject, ValidationIssue } from "../shared/model";
-import { resolveAudioTransition } from "../shared";
+import { childOutputOwners, resolveAudioTransition } from "../shared";
 import { AudioTrimEditor } from "./AudioTrimEditor";
 import { DistanceZonesEditor } from "./DistanceZonesEditor";
 import { IrLibrary } from "./IrLibrary";
+import {
+  applyStandardHarness,
+  STANDARD_OUTPUT_SLOTS,
+  STANDARD_TRIGGER_SLOTS,
+  toRuntimeProject,
+} from "../shared/standard-harness";
+import { StandardHarnessMap } from "./StandardHarnessMap";
+import { WiringConfigurations } from "./WiringConfigurations";
+import { HardwarePinSelect } from "./HardwarePinSelect";
 
 export interface EditorProps {
   project: SceneProject;
@@ -94,19 +103,58 @@ export function Hardware({
 }) {
   const allocation = allocatePins(project);
   const playerCount = requiredPlayerCount(project);
+  const standard = project.wiring === "standard-uno";
+  const fixed = project.wiring === "fixed";
+  const locked = standard || fixed;
+  const runtime = toRuntimeProject(project);
+  const showOutputEnable =
+    locked || project.outputs.some((output) => output.enabled !== undefined);
+  const changeWiring = (wiring: SceneProject["wiring"]) => {
+    if (wiring !== "standard-uno") {
+      change((next) => {
+        next.wiring = wiring;
+        if (wiring === "fixed")
+          next.wiringConfiguration ??= {
+            id: crypto.randomUUID(),
+            name: "Custom fixed wiring",
+          };
+        else delete next.wiringConfiguration;
+      });
+      return;
+    }
+    try {
+      const converted = applyStandardHarness(project);
+      delete converted.wiringConfiguration;
+      change((next) => {
+        Object.assign(next, converted);
+      });
+      notify(
+        "Standard harness selected. Review the fixed wiring map before uploading and rewiring.",
+      );
+    } catch (error) {
+      notify(String(error).replace(/^Error: /, ""), true);
+    }
+  };
   return (
     <div className="content-page">
       <div className="page-heading">
         <div>
           <h2>Build your controller</h2>
           <p>
-            Choose audio and inputs first. The remaining pins become available
-            outputs.
+            {locked
+              ? "Fixed connections for every controller. Enable the devices installed in this enclosure."
+              : "Choose audio and inputs first. The remaining pins become available outputs."}
           </p>
         </div>
         <span className="badge green">Runs without a computer</span>
       </div>
       <div className="cards-grid">
+        <WiringConfigurations
+          project={project}
+          change={change}
+          notify={notify}
+          confirm={confirm}
+        />
         <section className="card">
           <div className="card-heading">
             <h3>
@@ -119,6 +167,7 @@ export function Hardware({
             <select
               aria-label="Microcontroller"
               value={project.board}
+              disabled={fixed}
               onChange={(e) =>
                 change((next) => {
                   next.board = e.target.value as SceneProject["board"];
@@ -138,24 +187,31 @@ export function Hardware({
               aria-label="Wiring preset"
               value={project.wiring}
               onChange={(e) =>
-                change((next) => {
-                  next.wiring = e.target.value as SceneProject["wiring"];
-                })
+                changeWiring(e.target.value as SceneProject["wiring"])
               }
             >
+              <option value="fixed">Fixed / saved wiring configuration</option>
+              <option value="standard-uno">
+                Standard Uno / Nano / Pro Mini harness
+              </option>
               <option value="relay-shield">OctoBanger four-relay shield</option>
               <option value="custom">Individual outputs / custom wiring</option>
             </select>
           </label>
           <p className="hint">
-            {project.wiring === "relay-shield"
-              ? "The first four channels use D7, D6, D5, D4. Additional channels use available pins. Verify your shield uses this pinout."
-              : "Pin assignments are generated from this configuration. Use the displayed wiring map when connecting components."}{" "}
+            {fixed
+              ? "Pin assignments stay fixed. Choose each connection below; conflicts and unassigned pins must be resolved before upload. To change boards, select and review a wiring configuration above."
+              : standard
+                ? "Every hardware slot keeps its assigned pins, including disabled devices. Supports Uno, classic Nano, and 5 V / 16 MHz Pro Mini with one DFPlayer."
+                : project.wiring === "relay-shield"
+                  ? "The first four channels use D7, D6, D5, D4. Additional channels use available pins. Verify your shield uses this pinout."
+                  : "Pin assignments are generated from this configuration. Use the displayed wiring map when connecting components."}{" "}
             D0 and D1 remain reserved for USB communication.
           </p>
           <p className="hint">
-            Changing hardware reallocates pins. Upload the new configuration
-            before connecting the revised wiring.
+            {locked
+              ? "Turning a slot off preserves its settings and scene entries, but excludes it from playback and physical tests. Review the map before the first upload; switching wiring presets can move connections."
+              : "Changing hardware reallocates pins. Upload the new configuration before connecting the revised wiring."}
           </p>
         </section>
         <section className="card">
@@ -173,13 +229,31 @@ export function Hardware({
             <strong>{playerCount}</strong>
           </div>
           <div className="resource-stat">
-            <span>Triggers configured</span>
-            <strong>{project.triggers.length}</strong>
+            <span>{locked ? "Triggers enabled" : "Triggers configured"}</span>
+            <strong>
+              {locked
+                ? `${runtime.triggers.length} / ${LIMITS.triggers}`
+                : project.triggers.length}
+            </strong>
           </div>
           <div className="resource-stat">
-            <span>Outputs available for this setup</span>
-            <strong>{allocation.maxOutputs}</strong>
+            <span>
+              {locked
+                ? "Outputs enabled / fixed slots"
+                : "Outputs available for this setup"}
+            </span>
+            <strong>
+              {locked
+                ? `${runtime.outputs.length} / ${fixed ? project.outputs.length : STANDARD_OUTPUT_SLOTS.length}`
+                : allocation.maxOutputs}
+            </strong>
           </div>
+          {fixed && (
+            <div className="resource-stat">
+              <span>Unreserved GPIO</span>
+              <strong>{allocation.availableOutputPins.length}</strong>
+            </div>
+          )}
           <div>
             <div className="row between">
               <span className="muted small">Scene storage</span>
@@ -202,6 +276,12 @@ export function Hardware({
             </p>
           </div>
         </section>
+        {standard && (
+          <StandardHarnessMap
+            project={project}
+            onRestore={() => changeWiring("standard-uno")}
+          />
+        )}
         <IrLibrary
           project={project}
           change={change}
@@ -214,24 +294,34 @@ export function Hardware({
               <Radio size={17} />
               Triggers{" "}
               <span className="muted">
-                {project.triggers.length} / {LIMITS.triggers}
+                {locked ? runtime.triggers.length : project.triggers.length} /{" "}
+                {LIMITS.triggers}
               </span>
             </h3>
             <button
-              disabled={project.triggers.length >= LIMITS.triggers}
+              disabled={
+                (locked ? runtime.triggers.length : project.triggers.length) >=
+                LIMITS.triggers
+              }
               onClick={() =>
                 change((next) => {
-                  next.triggers.push(
-                    createTrigger(
-                      crypto.randomUUID(),
-                      `Trigger ${next.triggers.length + 1}`,
-                    ),
+                  const added = createTrigger(
+                    crypto.randomUUID(),
+                    `Trigger ${next.triggers.length + 1}`,
                   );
+                  if (standard) {
+                    added.kind = "manual";
+                    added.pin = added.echoPin = null;
+                    added.debounceMs = 0;
+                    added.activeLow = added.pullup = false;
+                    added.thresholdCm = added.hysteresisCm = 0;
+                  }
+                  next.triggers.push(added);
                 })
               }
             >
               <Plus size={14} />
-              Add trigger
+              {standard ? "Add app / timer trigger" : "Add trigger"}
             </button>
           </div>
           <div className="trigger-grid">
@@ -250,38 +340,97 @@ export function Hardware({
                       })
                     }
                   />
-                  <button
-                    className="icon ghost"
-                    aria-label={`Delete trigger ${trigger.name}`}
-                    onClick={() =>
-                      change((next) => {
-                        next.triggers.splice(index, 1);
-                        next.states.forEach((state) => {
-                          state.transitions = state.transitions.filter(
-                            (t) => t.triggerId !== trigger.id,
-                          );
-                        });
-                      })
-                    }
-                  >
-                    <Trash2 size={14} />
-                  </button>
+                  {!(standard && trigger.standardSlot) && (
+                    <button
+                      className="icon ghost"
+                      aria-label={`Delete trigger ${trigger.name}`}
+                      onClick={() =>
+                        change((next) => {
+                          next.triggers.splice(index, 1);
+                          next.states.forEach((state) => {
+                            state.transitions = state.transitions.filter(
+                              (t) => t.triggerId !== trigger.id,
+                            );
+                          });
+                        })
+                      }
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  )}
                 </div>
+                {(locked || trigger.enabled !== undefined) && (
+                  <>
+                    {standard && trigger.standardSlot && (
+                      <span className="badge">
+                        {
+                          STANDARD_TRIGGER_SLOTS.find(
+                            (slot) => slot.id === trigger.standardSlot,
+                          )?.label
+                        }
+                      </span>
+                    )}
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        aria-label={`Enable ${standard ? (STANDARD_TRIGGER_SLOTS.find((slot) => slot.id === trigger.standardSlot)?.label ?? trigger.name) : trigger.name}`}
+                        checked={trigger.enabled !== false}
+                        onChange={(event) =>
+                          change((next) => {
+                            next.triggers[index].enabled = event.target.checked;
+                          })
+                        }
+                      />
+                      Installed / enabled
+                    </label>
+                    {trigger.enabled === false && (
+                      <p className="hint">
+                        {standard && trigger.standardSlot
+                          ? "Disabled: pins reserved, sensor not sampled."
+                          : "Disabled: excluded from playback and physical tests."}{" "}
+                        Settings and transitions are retained.
+                      </p>
+                    )}
+                  </>
+                )}
                 <div className="field-grid">
                   <label>
-                    Sensor type
+                    Trigger type
                     <select
                       aria-label={`Trigger ${index + 1} type`}
                       value={trigger.kind}
+                      disabled={standard && !!trigger.standardSlot}
                       onChange={(e) =>
                         change((next) => {
                           const t = next.triggers[index];
                           t.kind = e.target.value as typeof t.kind;
                           t.activeLow = t.kind === "button";
                           t.pullup = t.kind === "button";
+                          if (fixed && t.kind !== "ultrasonic")
+                            t.echoPin = null;
+                          if (t.kind === "manual") {
+                            t.pin = null;
+                            t.echoPin = null;
+                            t.debounceMs = 0;
+                            t.thresholdCm = 0;
+                            t.hysteresisCm = 0;
+                            delete t.timerIntervalMs;
+                            delete t.timerResetOnTrigger;
+                            delete t.distanceMode;
+                            delete t.zones;
+                          }
+                          if (t.kind !== "manual" && t.kind !== "timer") {
+                            if (t.thresholdCm < 2) t.thresholdCm = 100;
+                            if (t.hysteresisCm < 1) t.hysteresisCm = 20;
+                          }
                           if (t.kind === "timer") {
+                            t.pin = t.echoPin = null;
                             t.timerIntervalMs ??= 30000;
                             t.timerResetOnTrigger ??= false;
+                          }
+                          if (t.kind === "timer" || t.kind === "manual") {
+                            delete t.configurationSlot;
+                            delete t.standardSlot;
                             next.states.forEach((state) => {
                               state.transitions = state.transitions.filter(
                                 (transition) =>
@@ -293,13 +442,18 @@ export function Hardware({
                         })
                       }
                     >
-                      <option value="button">Button / foot pad</option>
-                      <option value="pir">PIR motion sensor</option>
-                      <option value="ultrasonic">HC-SR04 ultrasonic</option>
+                      {(!standard || !!trigger.standardSlot) && (
+                        <>
+                          <option value="button">Button / foot pad</option>
+                          <option value="pir">PIR motion sensor</option>
+                          <option value="ultrasonic">HC-SR04 ultrasonic</option>
+                        </>
+                      )}
                       <option value="timer">Periodic timer · no pin</option>
+                      <option value="manual">App / manual · no pin</option>
                     </select>
                   </label>
-                  {trigger.kind !== "timer" && (
+                  {trigger.kind !== "timer" && trigger.kind !== "manual" && (
                     <label>
                       Debounce / dwell (ms)
                       <input
@@ -320,7 +474,12 @@ export function Hardware({
                     </label>
                   )}
                 </div>
-                {trigger.kind === "timer" ? (
+                {trigger.kind === "manual" ? (
+                  <p className="hint">
+                    Use Send trigger in the controller console, or its button in
+                    preview. Fires only when requested; no wiring needed.
+                  </p>
+                ) : trigger.kind === "timer" ? (
                   <>
                     <label>
                       Interval (seconds)
@@ -480,10 +639,48 @@ export function Hardware({
                 <div className="pin-label">
                   {trigger.kind === "timer"
                     ? "SOFTWARE TIMER · No GPIO used"
-                    : trigger.kind === "ultrasonic"
-                      ? `TRIG ${pinLabel(project.board, trigger.pin)} · ECHO ${pinLabel(project.board, trigger.echoPin)}`
-                      : `INPUT ${pinLabel(project.board, trigger.pin)}`}
+                    : trigger.kind === "manual"
+                      ? "APP TRIGGER · No GPIO used"
+                      : trigger.kind === "ultrasonic"
+                        ? `TRIG ${pinLabel(project.board, trigger.pin)} · ECHO ${pinLabel(project.board, trigger.echoPin)}`
+                        : `INPUT ${pinLabel(project.board, trigger.pin)}`}
                 </div>
+                {fixed &&
+                  trigger.kind !== "manual" &&
+                  trigger.kind !== "timer" && (
+                    <div className="field-grid">
+                      <label>
+                        {trigger.kind === "ultrasonic"
+                          ? "TRIG pin"
+                          : "Input pin"}
+                        <HardwarePinSelect
+                          board={project.board}
+                          value={trigger.pin}
+                          label={`Trigger ${index + 1} pin`}
+                          onChange={(pin) =>
+                            change((next) => {
+                              next.triggers[index].pin = pin;
+                            })
+                          }
+                        />
+                      </label>
+                      {trigger.kind === "ultrasonic" && (
+                        <label>
+                          ECHO pin
+                          <HardwarePinSelect
+                            board={project.board}
+                            value={trigger.echoPin}
+                            label={`Trigger ${index + 1} echo pin`}
+                            onChange={(pin) =>
+                              change((next) => {
+                                next.triggers[index].echoPin = pin;
+                              })
+                            }
+                          />
+                        </label>
+                      )}
+                    </div>
+                  )}
               </div>
             ))}
           </div>
@@ -495,8 +692,9 @@ export function Hardware({
           )}
           <p className="hint">
             Sensor transitions can respond to activation or release. Periodic
-            timers fire without consuming a pin. Ultrasonic sensors can use a
-            single threshold or multiple distance zones with their own actions.
+            timers and app triggers use no pin. App triggers fire only when
+            requested. Ultrasonic sensors can use a single threshold or multiple
+            distance zones with their own actions.
           </p>
         </section>
         <section className="card full">
@@ -505,37 +703,43 @@ export function Hardware({
               <SlidersHorizontal size={17} />
               Prop outputs{" "}
               <span className="muted">
-                {project.outputs.length} / {allocation.maxOutputs}
+                {locked ? runtime.outputs.length : project.outputs.length} /{" "}
+                {allocation.maxOutputs}
               </span>
             </h3>
-            <button
-              disabled={
-                project.outputs.length >= allocation.maxOutputs ||
-                project.outputs.length >= LIMITS.outputs
-              }
-              onClick={() =>
-                change((next) => {
-                  next.outputs.push({
-                    id: crypto.randomUUID(),
-                    name: `Output ${next.outputs.length + 1}`,
-                    pin: null,
-                    activeLow: false,
-                    idleActive: false,
-                    color:
-                      OUTPUT_COLORS[next.outputs.length % OUTPUT_COLORS.length],
-                  });
-                })
-              }
-            >
-              <Plus size={14} />
-              Add output
-            </button>
+            {!standard && (
+              <button
+                disabled={
+                  (!fixed && project.outputs.length >= allocation.maxOutputs) ||
+                  project.outputs.length >= LIMITS.outputs
+                }
+                onClick={() =>
+                  change((next) => {
+                    next.outputs.push({
+                      id: crypto.randomUUID(),
+                      name: `Output ${next.outputs.length + 1}`,
+                      pin: null,
+                      activeLow: false,
+                      idleActive: false,
+                      color:
+                        OUTPUT_COLORS[
+                          next.outputs.length % OUTPUT_COLORS.length
+                        ],
+                    });
+                  })
+                }
+              >
+                <Plus size={14} />
+                Add output
+              </button>
+            )}
           </div>
           <table className="config-table">
             <thead>
               <tr>
                 <th>Color</th>
                 <th>Channel name</th>
+                {showOutputEnable && <th>Installed / enabled</th>}
                 <th>Pin</th>
                 <th>Active low</th>
                 <th>Active at idle</th>
@@ -568,8 +772,43 @@ export function Hardware({
                       }
                     />
                   </td>
+                  {showOutputEnable && (
+                    <td>
+                      <label className="check">
+                        <input
+                          type="checkbox"
+                          aria-label={`Enable ${standard ? (STANDARD_OUTPUT_SLOTS.find((slot) => slot.id === output.standardSlot)?.label ?? output.name) : output.name}`}
+                          checked={output.enabled !== false}
+                          onChange={(event) =>
+                            change((next) => {
+                              next.outputs[index].enabled =
+                                event.target.checked;
+                            })
+                          }
+                        />
+                        {standard
+                          ? (STANDARD_OUTPUT_SLOTS.find(
+                              (slot) => slot.id === output.standardSlot,
+                            )?.label ?? "Unassigned slot")
+                          : "Enabled"}
+                      </label>
+                    </td>
+                  )}
                   <td className="pin-label">
-                    {pinLabel(project.board, output.pin)}
+                    {fixed ? (
+                      <HardwarePinSelect
+                        board={project.board}
+                        value={output.pin}
+                        label={`Output ${index + 1} pin`}
+                        onChange={(pin) =>
+                          change((next) => {
+                            next.outputs[index].pin = pin;
+                          })
+                        }
+                      />
+                    ) : (
+                      pinLabel(project.board, output.pin)
+                    )}
                   </td>
                   <td>
                     <input
@@ -588,6 +827,12 @@ export function Hardware({
                       aria-label={`${output.name} active at idle`}
                       type="checkbox"
                       checked={output.idleActive}
+                      disabled={childOutputOwners(project).has(output.id)}
+                      title={
+                        childOutputOwners(project).has(output.id)
+                          ? `Reserved for child: ${childOutputOwners(project).get(output.id)!.name}; must stay off at idle`
+                          : undefined
+                      }
                       onChange={(e) =>
                         change((next) => {
                           next.outputs[index].idleActive = e.target.checked;
@@ -596,22 +841,24 @@ export function Hardware({
                     />
                   </td>
                   <td>
-                    <button
-                      className="icon ghost"
-                      aria-label={`Delete output ${output.name}`}
-                      onClick={() =>
-                        change((next) => {
-                          next.outputs.splice(index, 1);
-                          next.states.forEach((state) => {
-                            state.events = state.events.filter(
-                              (event) => event.outputId !== output.id,
-                            );
-                          });
-                        })
-                      }
-                    >
-                      <Trash2 size={14} />
-                    </button>
+                    {!(standard && output.standardSlot) && (
+                      <button
+                        className="icon ghost"
+                        aria-label={`Delete output ${output.name}`}
+                        onClick={() =>
+                          change((next) => {
+                            next.outputs.splice(index, 1);
+                            next.states.forEach((state) => {
+                              state.events = state.events.filter(
+                                (event) => event.outputId !== output.id,
+                              );
+                            });
+                          })
+                        }
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -630,8 +877,26 @@ export function Hardware({
               Audio device wiring
             </h3>
             <span className="badge">
-              {playerCount} module{playerCount === 1 ? "" : "s"}
+              {project.audio.players.length} module
+              {project.audio.players.length === 1 ? "" : "s"}
             </span>
+            {fixed && (
+              <button
+                disabled={project.audio.players.length >= LIMITS.players}
+                onClick={() =>
+                  change((next) => {
+                    next.audio.players.push({
+                      id: crypto.randomUUID(),
+                      kind: "dfplayer",
+                      txPin: null,
+                      rxPin: null,
+                    });
+                  })
+                }
+              >
+                <Plus size={14} /> Add MP3 player
+              </button>
+            )}
           </div>
           {project.audio.players.length ? (
             <table className="config-table">
@@ -642,6 +907,7 @@ export function Hardware({
                   <th>Controller TX → module RX</th>
                   <th>Controller RX ← module TX</th>
                   <th>Playback feedback</th>
+                  {fixed && <th />}
                 </tr>
               </thead>
               <tbody>
@@ -664,10 +930,36 @@ export function Hardware({
                       </select>
                     </td>
                     <td className="pin-label">
-                      {pinLabel(project.board, player.txPin)}
+                      {fixed ? (
+                        <HardwarePinSelect
+                          board={project.board}
+                          value={player.txPin}
+                          label={`Player ${index + 1} TX pin`}
+                          onChange={(pin) =>
+                            change((next) => {
+                              next.audio.players[index].txPin = pin;
+                            })
+                          }
+                        />
+                      ) : (
+                        pinLabel(project.board, player.txPin)
+                      )}
                     </td>
                     <td className="pin-label">
-                      {pinLabel(project.board, player.rxPin)}
+                      {fixed ? (
+                        <HardwarePinSelect
+                          board={project.board}
+                          value={player.rxPin}
+                          label={`Player ${index + 1} RX pin`}
+                          onChange={(pin) =>
+                            change((next) => {
+                              next.audio.players[index].rxPin = pin;
+                            })
+                          }
+                        />
+                      ) : (
+                        pinLabel(project.board, player.rxPin)
+                      )}
                     </td>
                     <td>
                       <label className="check">
@@ -692,7 +984,22 @@ export function Hardware({
                         <>
                           <span className="pin-label">
                             BUSY →{" "}
-                            {pinLabel(project.board, player.feedback.pin)}
+                            {fixed ? (
+                              <HardwarePinSelect
+                                board={project.board}
+                                value={player.feedback.pin}
+                                label={`Player ${index + 1} BUSY pin`}
+                                feedback
+                                onChange={(pin) =>
+                                  change((next) => {
+                                    next.audio.players[index].feedback!.pin =
+                                      pin;
+                                  })
+                                }
+                              />
+                            ) : (
+                              pinLabel(project.board, player.feedback.pin)
+                            )}
                           </span>
                           <label className="check">
                             <input
@@ -712,6 +1019,21 @@ export function Hardware({
                         </>
                       )}
                     </td>
+                    {fixed && (
+                      <td>
+                        <button
+                          className="icon ghost"
+                          aria-label={`Delete player ${index + 1}`}
+                          onClick={() =>
+                            change((next) => {
+                              next.audio.players.splice(index, 1);
+                            })
+                          }
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -731,10 +1053,13 @@ export function Hardware({
             transition.
           </p>
           <p className="hint">
-            Player count follows simultaneous playback needs. Fade out / fade in
-            can switch tracks on one player. Crossfading uses two players;
-            continuous ambient plus foreground crossfades uses three. Mix audio
-            using suitable mixer inputs, never directly join speaker outputs.
+            {fixed
+              ? "Add the MP3 players installed in this configuration and assign their pins. "
+              : "Player count follows simultaneous playback needs. "}
+            Fade out / fade in can switch tracks on one player. Crossfading uses
+            two players; continuous ambient plus foreground crossfades uses
+            three. Mix audio using suitable mixer inputs, never directly join
+            speaker outputs.
           </p>
         </section>
         {issues.length > 0 && (
@@ -989,12 +1314,14 @@ export function Media({
             <span className="badge">MP3 modules</span>
           </div>
           <p className="hint">
-            Each player needs the same track library. Export media creates a
-            folder named 01 containing numbered MP3 files: 001.mp3, 002.mp3, and
-            so on. Copy that folder to each card. The project retains original
-            filenames for editing. Applied trims are rendered into the exported
-            files, so the players start at your chosen beginning and stop at
-            your chosen end.
+            Each player needs the same track library. Insert its SD card into
+            your computer's card reader, then export directly to the card's root
+            folder. The app creates 01 and writes numbered MP3 files: 001.mp3,
+            002.mp3, and so on. Repeat for each card. You can also export to a
+            local folder to copy later. The project retains original filenames
+            for editing. Applied trims are rendered into the exported files, so
+            the players start at your chosen beginning and stop at your chosen
+            end.
           </p>
           <button
             disabled={!project.audio.tracks.length || !window.cpc}

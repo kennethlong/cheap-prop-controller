@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   compileProject,
   createDefaultProject,
+  createState,
   encodeIrPulses,
   synchronizeAudioPlayers,
   type IrCommand,
@@ -723,6 +724,104 @@ afterEach(() => {
 });
 
 describe("serial upload and priority controls", () => {
+  it.each([undefined, false, "true"])(
+    "requires explicit manual-trigger support before any storage writes (%s)",
+    async (manualTriggers) => {
+      const { service, port } = await connected();
+      const project = createDefaultProject();
+      Object.assign(project.triggers[0], {
+        kind: "manual",
+        pin: null,
+        echoPin: null,
+      });
+      const compiled = compileProject(project);
+      expect(
+        compiled.issues.filter((issue) => issue.severity === "error"),
+      ).toEqual([]);
+      const values = [...compiled.bytes];
+      port.onWrite = () =>
+        port.reply({ ...hello, sceneControls: true, manualTriggers });
+      const rejected = failure(service.upload(values));
+      await flush();
+      expect(String(await rejected)).toContain("app / manual triggers");
+      expect(port.writes.every((command) => command === "HELLO")).toBe(true);
+      port.onWrite = (command) => {
+        if (command === "HELLO")
+          port.reply({ ...hello, sceneControls: true, manualTriggers: true });
+        else if (command.startsWith("DATA ")) {
+          const [, offset, data] = command.split(" ");
+          port.reply({
+            type: "ack",
+            command: "DATA",
+            offset: Number(offset) + data.length / 2,
+          });
+        } else port.reply({ type: "ack", command: command.split(" ")[0] });
+      };
+      const uploaded = service.upload(values);
+      await flush();
+      expect(await uploaded).toEqual({ type: "ack", command: "COMMIT" });
+      await service.disconnect();
+    },
+  );
+
+  it.each([
+    [undefined, true],
+    [false, true],
+    ["true", true],
+    [true, undefined],
+    [true, false],
+    [true, "true"],
+  ])(
+    "requires explicit child and scene-controls capabilities before CPC3 writes (%s, %s)",
+    async (parallelChildren, sceneControls) => {
+      const { service, port } = await connected();
+      const project = createDefaultProject();
+      const child = createState("blast", "Ankle blaster");
+      child.kind = "child";
+      child.durationMs = 250;
+      child.cooldownMs = 2000;
+      child.events = [
+        { id: "pulse", outputId: "output-8", startMs: 0, endMs: 250 },
+      ];
+      project.states.push(child);
+      project.states[1].transitions = [
+        { triggerId: project.triggers[1].id, targetStateId: child.id },
+      ];
+      const compiled = compileProject(project);
+      expect(
+        compiled.issues.filter((issue) => issue.severity === "error"),
+      ).toEqual([]);
+      const values = [...compiled.bytes];
+      expect(String.fromCharCode(...values.slice(0, 4))).toBe("CPC3");
+      port.onWrite = () =>
+        port.reply({ ...hello, parallelChildren, sceneControls });
+      const rejected = failure(service.upload(values));
+      await flush();
+      expect(String(await rejected)).toContain(
+        parallelChildren === true
+          ? "advanced scene controls"
+          : "parallel child sequences",
+      );
+      expect(port.writes.every((command) => command === "HELLO")).toBe(true);
+      port.onWrite = (command) => {
+        if (command === "HELLO")
+          port.reply({ ...hello, parallelChildren: true, sceneControls: true });
+        else if (command.startsWith("DATA ")) {
+          const [, offset, data] = command.split(" ");
+          port.reply({
+            type: "ack",
+            command: "DATA",
+            offset: Number(offset) + data.length / 2,
+          });
+        } else port.reply({ type: "ack", command: command.split(" ")[0] });
+      };
+      const uploaded = service.upload(values);
+      await flush();
+      expect(await uploaded).toEqual({ type: "ack", command: "COMMIT" });
+      await service.disconnect();
+    },
+  );
+
   it.each([undefined, false, "true"])(
     "requires explicit CPC2 scene-controls support before changing saved storage (%s)",
     async (capability) => {

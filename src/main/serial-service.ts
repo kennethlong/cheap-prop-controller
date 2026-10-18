@@ -263,7 +263,7 @@ export class SerialService extends EventEmitter {
         throw new Error("Invalid compiled scene");
       const bytes = Buffer.from(expectedScene);
       if (
-        !/^CPC[12]$/.test(bytes.toString("ascii", 0, 4)) ||
+        !/^CPC[123]$/.test(bytes.toString("ascii", 0, 4)) ||
         bytes.readUInt16LE(4) !== bytes.length ||
         !verifySceneChecksum(bytes)
       )
@@ -395,7 +395,7 @@ export class SerialService extends EventEmitter {
         throw new Error("Invalid compiled scene");
       const bytes = Buffer.from(values);
       if (
-        !/^CPC[12]$/.test(bytes.toString("ascii", 0, 4)) ||
+        !/^CPC[123]$/.test(bytes.toString("ascii", 0, 4)) ||
         bytes.readUInt16LE(4) !== bytes.length
       )
         throw new Error("Invalid scene image header");
@@ -405,9 +405,29 @@ export class SerialService extends EventEmitter {
       this.ensureCurrent(generation);
       if (hello.type !== "hello" || hello.protocol !== 1)
         throw new Error("Incompatible controller firmware");
-      if (bytes[3] === 0x32 && hello.sceneControls !== true)
+      if (bytes[3] === 0x33 && hello.parallelChildren !== true)
+        throw new Error(
+          "Install the updated firmware to run parallel child sequences. The saved controller scene has not been changed.",
+        );
+      if (bytes[3] >= 0x32 && hello.sceneControls !== true)
         throw new Error(
           "Install the updated firmware to use advanced scene controls. The saved controller scene has not been changed.",
+        );
+      const triggerOffset = bytes.readUInt16LE(22);
+      const triggerCount = bytes[10];
+      if (
+        triggerCount > 8 ||
+        triggerOffset < 32 ||
+        triggerOffset + triggerCount * 8 > bytes.length
+      )
+        throw new Error("Invalid scene trigger table");
+      const usesManualTrigger = Array.from(
+        { length: triggerCount },
+        (_, index) => bytes[triggerOffset + index * 8],
+      ).includes(4);
+      if (usesManualTrigger && hello.manualTriggers !== true)
+        throw new Error(
+          "Install the updated firmware to use app / manual triggers. The saved controller scene has not been changed.",
         );
       const boardIds: Record<string, number> = {
         uno: 1,

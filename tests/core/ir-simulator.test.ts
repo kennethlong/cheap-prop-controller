@@ -93,34 +93,30 @@ describe("logical IR preview", () => {
   it("repeats cues including tick zero on every timeline loop", () => {
     const project = irProject();
     Object.assign(project.states[0], {
-      durationMs: 150,
+      durationMs: 500,
       loopTimeline: true,
       irEvents: [cue(0, "off"), cue(100, "on")],
     });
-    const result = createSimulator(project).advance(300);
+    const result = createSimulator(project).advance(1000);
     expect(
       result.irActivity.map((entry) => [entry.commandId, entry.atMs]),
     ).toEqual([
       ["off", 0],
       ["on", 100],
-      ["off", 150],
-      ["on", 250],
-      ["off", 300],
+      ["off", 500],
+      ["on", 600],
+      ["off", 1000],
     ]);
   });
 
-  it("recognizes wraps when the whole looping state lasts one tick", () => {
+  it("rejects one-tick IR loops that cannot drain the transmitter queue", () => {
     const project = irProject();
     Object.assign(project.states[0], {
       durationMs: 50,
       loopTimeline: true,
       irEvents: [cue(0, "on")],
     });
-    expect(
-      createSimulator(project)
-        .advance(150)
-        .irActivity.map((entry) => entry.atMs),
-    ).toEqual([0, 50, 100, 150]);
+    expect(() => createSimulator(project)).toThrow("send queue will overflow");
   });
 
   it("fires entry cues again on a same-state restart and cancels its previous timer", () => {
@@ -261,17 +257,17 @@ describe("logical IR preview", () => {
   it("bounds activity history and does not expose mutable internal records", () => {
     const project = irProject();
     Object.assign(project.states[0], {
-      durationMs: 50,
+      durationMs: 200,
       loopTimeline: true,
       irEvents: [cue(0, "on")],
     });
     const simulator = createSimulator(project);
-    const result = simulator.advance(2000);
+    const result = simulator.advance(8000);
     expect(result.irActivity).toHaveLength(32);
-    expect(result.irActivity[0]).toMatchObject({ sequence: 10, atMs: 450 });
+    expect(result.irActivity[0]).toMatchObject({ sequence: 10, atMs: 1800 });
     expect(result.irActivity.at(-1)).toMatchObject({
       sequence: 41,
-      atMs: 2000,
+      atMs: 8000,
     });
     result.irActivity[0].name = "tampered";
     result.irActivity.length = 0;

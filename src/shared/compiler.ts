@@ -5,6 +5,9 @@ import {
 } from "./audio-settings";
 import type { BoardId, SceneProject, ValidationIssue } from "./model";
 import { isZonedTrigger } from "./model";
+import { expandIrEvents } from "./ir-macros";
+import { isChildState, usesParallelChildren } from "./parallel-children";
+import { toRuntimeProject } from "./standard-harness";
 import {
   timerInterval,
   transitionTargets,
@@ -71,6 +74,7 @@ export function compileProject(project: SceneProject): CompiledScene {
   const issues = validateProject(project);
   if (issues.some((issue) => issue.severity === "error"))
     return { bytes: new Uint8Array(), usedBytes, capacityBytes, issues };
+  project = toRuntimeProject(project);
   const bytes = new Uint8Array(usedBytes);
   const view = new DataView(bytes.buffer);
   const u16 = (offset: number, value: number) =>
@@ -92,7 +96,16 @@ export function compileProject(project: SceneProject): CompiledScene {
       : [],
   );
   const ir = project.ir?.enabled ? project.ir : undefined;
-  bytes.set([0x43, 0x50, 0x43, usesSceneControls(project) ? 0x32 : 0x31]);
+  bytes.set([
+    0x43,
+    0x50,
+    0x43,
+    usesParallelChildren(project)
+      ? 0x33
+      : usesSceneControls(project)
+        ? 0x32
+        : 0x31,
+  ]);
   u16(4, usedBytes);
   bytes[8] = BOARD_CODES[project.board];
   bytes[9] = project.outputs.length;
@@ -127,9 +140,14 @@ export function compileProject(project: SceneProject): CompiledScene {
   });
   project.triggers.forEach((trigger, index) => {
     const offset = triggerOffset + index * BINARY.trigger;
-    bytes[offset] = ({ button: 0, pir: 1, ultrasonic: 2, timer: 3 } as const)[
-      trigger.kind
-    ];
+    bytes[offset] = (
+      { button: 0, pir: 1, ultrasonic: 2, timer: 3, manual: 4 } as const
+    )[trigger.kind];
+    if (trigger.kind === "manual") {
+      // Dormant physical/timer settings remain editable, but never reach firmware.
+      bytes[offset + 1] = bytes[offset + 2] = 255;
+      return;
+    }
     if (trigger.kind === "timer") {
       bytes[offset + 1] = bytes[offset + 2] = 255;
       bytes[offset + 3] = trigger.timerResetOnTrigger ? 1 : 0;
@@ -167,7 +185,10 @@ export function compileProject(project: SceneProject): CompiledScene {
     );
     bytes[offset + 11] = state.volume;
     bytes[offset + 12] =
-      (state.loopTimeline ? 1 : 0) | (state.loopAudio ? 2 : 0);
+      (state.loopTimeline ? 1 : 0) |
+      (state.loopAudio ? 2 : 0) |
+      (isChildState(state) ? 4 : 0);
+    if (isChildState(state)) u16(offset + 14, (state.cooldownMs ?? 0) / 50);
     if (state.audioEndStateId)
       bytes[offset + 13] =
         project.states.findIndex(
@@ -239,9 +260,7 @@ export function compileProject(project: SceneProject): CompiledScene {
     });
     if (ir) {
       const events = project.states.flatMap((state, stateIndex) =>
-        [...(state.irEvents ?? [])]
-          .sort((a, b) => a.atMs - b.atMs)
-          .map((event) => ({ stateIndex, event })),
+        expandIrEvents(project, state).map((event) => ({ stateIndex, event })),
       );
       const irEventOffset = actionOffset + actionIndex * BINARY.zoneAction;
       events.forEach(({ stateIndex, event }, index) => {
@@ -297,7 +316,7 @@ export function verifySceneChecksum(bytes: Uint8Array): boolean {
     bytes[0] !== 0x43 ||
     bytes[1] !== 0x50 ||
     bytes[2] !== 0x43 ||
-    (bytes[3] !== 0x31 && bytes[3] !== 0x32)
+    (bytes[3] !== 0x31 && bytes[3] !== 0x32 && bytes[3] !== 0x33)
   )
     return false;
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);

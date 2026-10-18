@@ -6,7 +6,16 @@ import {
   SHIELD_PINS,
 } from "./boards";
 import { irCommandDurationMs, validateIrSignal } from "./ir";
+import { expandIrEvents } from "./ir-macros";
 import { timerInterval, transitionTargets } from "./scene-controls";
+import { childOutputOwners, isChildState } from "./parallel-children";
+import { validateFixedPins } from "./wiring-configurations";
+import {
+  STANDARD_OUTPUT_SLOTS,
+  STANDARD_TRIGGER_SLOTS,
+  toRuntimeProject,
+  validateStandardHarness,
+} from "./standard-harness";
 import {
   isZonedTrigger,
   LIMITS,
@@ -71,8 +80,22 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
     fail("version", "Unsupported project version. Expected version 1.");
   text(project.name, "name");
   enumeration(project.board, Object.keys(BOARD_PROFILES), "board");
-  enumeration(project.wiring, ["custom", "relay-shield"], "wiring");
+  enumeration(
+    project.wiring,
+    ["custom", "relay-shield", "standard-uno", "fixed"],
+    "wiring",
+  );
   text(project.initialStateId, "initialStateId");
+  if (project.wiringConfiguration !== undefined) {
+    const configuration = object(
+      project.wiringConfiguration,
+      "wiringConfiguration",
+    );
+    if (configuration) {
+      text(configuration.id, "wiringConfiguration.id");
+      text(configuration.name, "wiringConfiguration.name");
+    }
+  }
   array(project.outputs, "outputs", 256).forEach((candidate, index) => {
     const path = `outputs.${index}`;
     const output = object(candidate, path);
@@ -83,6 +106,15 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
     number(output.pin, `${path}.pin`, true);
     boolean(output.activeLow, `${path}.activeLow`);
     boolean(output.idleActive, `${path}.idleActive`);
+    if (output.enabled !== undefined)
+      boolean(output.enabled, `${path}.enabled`);
+    text(output.configurationSlot, `${path}.configurationSlot`, true);
+    if (output.standardSlot !== undefined)
+      enumeration(
+        output.standardSlot,
+        STANDARD_OUTPUT_SLOTS.map((slot) => slot.id),
+        `${path}.standardSlot`,
+      );
   });
   array(project.triggers, "triggers", 256).forEach((candidate, index) => {
     const path = `triggers.${index}`;
@@ -92,7 +124,7 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
     text(trigger.name, `${path}.name`);
     enumeration(
       trigger.kind,
-      ["button", "pir", "ultrasonic", "timer"],
+      ["button", "pir", "ultrasonic", "timer", "manual"],
       `${path}.kind`,
     );
     number(trigger.pin, `${path}.pin`, true);
@@ -102,6 +134,15 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
     number(trigger.debounceMs, `${path}.debounceMs`);
     number(trigger.thresholdCm, `${path}.thresholdCm`);
     number(trigger.hysteresisCm, `${path}.hysteresisCm`);
+    if (trigger.enabled !== undefined)
+      boolean(trigger.enabled, `${path}.enabled`);
+    text(trigger.configurationSlot, `${path}.configurationSlot`, true);
+    if (trigger.standardSlot !== undefined)
+      enumeration(
+        trigger.standardSlot,
+        STANDARD_TRIGGER_SLOTS.map((slot) => slot.id),
+        `${path}.standardSlot`,
+      );
     if (trigger.timerIntervalMs !== undefined)
       number(trigger.timerIntervalMs, `${path}.timerIntervalMs`);
     if (trigger.timerResetOnTrigger !== undefined)
@@ -176,6 +217,31 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
             (pulse, i) => number(pulse, `${path}.signal.pulsesUs.${i}`),
           );
       });
+      if (ir.macros !== undefined)
+        array(ir.macros, "ir.macros", 256).forEach((candidate, index) => {
+          const path = `ir.macros.${index}`;
+          const macro = object(candidate, path);
+          if (!macro) return;
+          text(macro.id, `${path}.id`);
+          text(macro.name, `${path}.name`);
+          array(macro.steps, `${path}.steps`, 256).forEach(
+            (candidate, stepIndex) => {
+              const stepPath = `${path}.steps.${stepIndex}`;
+              const step = object(candidate, stepPath);
+              if (!step) return;
+              text(step.id, `${stepPath}.id`);
+              text(step.commandId, `${stepPath}.commandId`);
+              number(step.atMs, `${stepPath}.atMs`);
+              if (step.macroId !== undefined)
+                fail(stepPath, "IR macros cannot contain other macros.");
+              if (step.sendCount !== undefined || step.gapMs !== undefined)
+                fail(
+                  stepPath,
+                  "Set press counts and gaps on the named IR command.",
+                );
+            },
+          );
+        });
     }
   }
   const audio = object(project.audio, "audio");
@@ -236,6 +302,10 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
     if (!state) return;
     text(state.id, `${path}.id`);
     text(state.name, `${path}.name`);
+    if (state.kind !== undefined)
+      enumeration(state.kind, ["main", "child"], `${path}.kind`);
+    if (state.cooldownMs !== undefined)
+      number(state.cooldownMs, `${path}.cooldownMs`);
     number(state.durationMs, `${path}.durationMs`);
     number(state.foregroundTrack, `${path}.foregroundTrack`, true);
     number(state.volume, `${path}.volume`);
@@ -250,7 +320,8 @@ export function validateProjectStructure(value: unknown): ValidationIssue[] {
           const event = object(candidate, eventPath);
           if (!event) return;
           text(event.id, `${eventPath}.id`);
-          text(event.commandId, `${eventPath}.commandId`);
+          text(event.commandId, `${eventPath}.commandId`, true);
+          text(event.macroId, `${eventPath}.macroId`, true);
           number(event.atMs, `${eventPath}.atMs`);
         },
       );
@@ -306,6 +377,7 @@ export function parseProject(value: unknown): SceneProject {
 }
 
 export function estimateSceneBytes(project: SceneProject): number {
+  project = toRuntimeProject(project);
   const zones = project.triggers
     .filter(isZonedTrigger)
     .flatMap((trigger) => trigger.zones ?? []);
@@ -328,7 +400,8 @@ export function estimateSceneBytes(project: SceneProject): number {
         0,
       ) +
       project.states.reduce(
-        (sum, state) => sum + (state.irEvents?.length ?? 0) * 4,
+        (sum, state) =>
+          sum + expandedIrEventCount(project, state.irEvents ?? []) * 4,
         0,
       )
     : 0;
@@ -354,11 +427,31 @@ export function estimateSceneBytes(project: SceneProject): number {
   );
 }
 
+/** Drafts can contain broken references; validation reports them separately. */
+function expandedIrEventCount(
+  project: SceneProject,
+  events: NonNullable<SceneProject["states"][number]["irEvents"]>,
+): number {
+  const macros = new Map(project.ir?.macros?.map((macro) => [macro.id, macro]));
+  return events.reduce(
+    (count, event) =>
+      count +
+      (event.macroId !== undefined
+        ? (macros.get(event.macroId)?.steps.length ?? 1)
+        : 1),
+    0,
+  );
+}
+
 export function validateProject(value: unknown): ValidationIssue[] {
   const structural = validateProjectStructure(value);
   if (structural.length) return structural;
   const project = value as SceneProject;
-  const issues: ValidationIssue[] = [];
+  const runtime = toRuntimeProject(project);
+  const issues: ValidationIssue[] = [
+    ...validateStandardHarness(project),
+    ...validateFixedPins(project),
+  ];
   const fail = (
     path: string,
     message: string,
@@ -388,15 +481,19 @@ export function validateProject(value: unknown): ValidationIssue[] {
     });
   };
   nonempty(project.name, "name");
-  integer(project.outputs.length, 0, LIMITS.outputs, "outputs");
-  integer(project.triggers.length, 0, LIMITS.triggers, "triggers");
+  integer(runtime.outputs.length, 0, LIMITS.outputs, "outputs");
+  integer(runtime.triggers.length, 0, LIMITS.triggers, "triggers");
   integer(project.audio.players.length, 0, LIMITS.players, "audio.players");
-  integer(project.states.length, 1, LIMITS.states, "states");
+  integer(runtime.states.length, 1, LIMITS.states, "states");
   uniqueIds(project.outputs, "outputs");
   uniqueIds(project.triggers, "triggers");
   uniqueIds(project.audio.players, "audio.players");
   uniqueIds(project.states, "states");
   const stateIds = new Set(project.states.map((state) => state.id));
+  const childIds = new Set(
+    project.states.filter(isChildState).map((state) => state.id),
+  );
+  const outputOwners = childOutputOwners(project);
   let totalZones = 0;
   let totalZoneActions = 0;
   const profile = BOARD_PROFILES[project.board];
@@ -423,8 +520,15 @@ export function validateProject(value: unknown): ValidationIssue[] {
   const irCommands = new Map(
     project.ir?.commands.map((command) => [command.id, command]) ?? [],
   );
+  const irMacros = new Map(
+    project.ir?.macros?.map((macro) => [macro.id, macro]),
+  );
   const irReference = (id: string, path: string) => {
-    if (!project.ir?.enabled)
+    if (
+      !project.ir?.enabled &&
+      project.wiring !== "standard-uno" &&
+      project.wiring !== "fixed"
+    )
       fail(path, "Enable IR hardware before using an IR command.");
     if (!irCommands.has(id))
       fail(path, "IR command does not exist in the project library.");
@@ -445,6 +549,31 @@ export function validateProject(value: unknown): ValidationIssue[] {
       integer(command.sendCount, 1, 10, `${path}.sendCount`);
       ticks(command.gapMs, 50, 2000, `${path}.gapMs`);
     });
+    const macros = project.ir.macros ?? [];
+    integer(macros.length, 0, LIMITS.irMacros, "ir.macros");
+    uniqueIds(macros, "ir.macros");
+    macros.forEach((macro, index) => {
+      const path = `ir.macros.${index}`;
+      nonempty(macro.name, `${path}.name`);
+      if (macro.name.length > 200)
+        fail(`${path}.name`, "Macro names are limited to 200 characters.");
+      integer(macro.steps.length, 1, LIMITS.irMacroSteps, `${path}.steps`);
+      uniqueIds(macro.steps, `${path}.steps`);
+      macro.steps.forEach((step, stepIndex) => {
+        const stepPath = `${path}.steps.${stepIndex}`;
+        ticks(
+          step.atMs,
+          0,
+          LIMITS.maxDurationMs - LIMITS.tickMs,
+          `${stepPath}.atMs`,
+        );
+        if (!irCommands.has(step.commandId))
+          fail(
+            `${stepPath}.commandId`,
+            "IR command does not exist in the project library.",
+          );
+      });
+    });
     if (project.ir.enabled) {
       const fixed = irPins(project.board);
       claimPin(project.ir.txPin, "ir.txPin");
@@ -463,7 +592,12 @@ export function validateProject(value: unknown): ValidationIssue[] {
         `outputs.${index}.color`,
         "Use a six-digit hex color, such as #60a5fa.",
       );
-    claimPin(output.pin, `outputs.${index}.pin`);
+    if (output.enabled !== false) claimPin(output.pin, `outputs.${index}.pin`);
+    if (output.idleActive && outputOwners.has(output.id))
+      fail(
+        `outputs.${index}.idleActive`,
+        "Outputs reserved by a child sequence must be off when idle.",
+      );
     if (
       project.wiring === "relay-shield" &&
       index < 4 &&
@@ -483,6 +617,11 @@ export function validateProject(value: unknown): ValidationIssue[] {
   project.triggers.forEach((trigger, index) => {
     const path = `triggers.${index}`;
     nonempty(trigger.name, `${path}.name`);
+    if (trigger.kind === "manual") {
+      if (trigger.pin !== null || trigger.echoPin !== null)
+        fail(path, "Manual triggers do not use GPIO pins.");
+      return;
+    }
     if (trigger.kind === "timer") {
       if (trigger.pin !== null || trigger.echoPin !== null)
         fail(path, "Timer triggers do not use GPIO pins.");
@@ -494,12 +633,13 @@ export function validateProject(value: unknown): ValidationIssue[] {
       );
       return;
     }
-    claimPin(trigger.pin, `${path}.pin`);
+    if (trigger.enabled !== false) claimPin(trigger.pin, `${path}.pin`);
     ticks(trigger.debounceMs, 0, 12750, `${path}.debounceMs`);
     integer(trigger.thresholdCm, 2, 400, `${path}.thresholdCm`);
     integer(trigger.hysteresisCm, 1, 255, `${path}.hysteresisCm`);
     if (trigger.kind === "ultrasonic") {
-      claimPin(trigger.echoPin, `${path}.echoPin`);
+      if (trigger.enabled !== false)
+        claimPin(trigger.echoPin, `${path}.echoPin`);
       if (trigger.activeLow || trigger.pullup)
         fail(
           path,
@@ -517,7 +657,7 @@ export function validateProject(value: unknown): ValidationIssue[] {
       const zones = trigger.zones ?? [];
       integer(zones.length, 1, LIMITS.zones, `${path}.zones`);
       uniqueIds(zones, `${path}.zones`);
-      totalZones += zones.length;
+      if (trigger.enabled !== false) totalZones += zones.length;
       zones.forEach((zone, zoneIndex) => {
         const zonePath = `${path}.zones.${zoneIndex}`;
         nonempty(zone.name, `${zonePath}.name`);
@@ -539,12 +679,26 @@ export function validateProject(value: unknown): ValidationIssue[] {
           );
         for (const edge of ["onEnter", "onExit"] as const) {
           uniqueIds(zone[edge], `${zonePath}.${edge}`);
-          totalZoneActions += zone[edge].length;
+          if (trigger.enabled !== false)
+            totalZoneActions += zone[edge].filter(
+              (action) =>
+                !(
+                  action.kind === "ir" &&
+                  (project.wiring === "standard-uno" ||
+                    project.wiring === "fixed") &&
+                  !project.ir?.enabled
+                ),
+            ).length;
           zone[edge].forEach((action, actionIndex) => {
             const actionPath = `${zonePath}.${edge}.${actionIndex}`;
             if (action.kind === "state") {
               if (!stateIds.has(action.stateId))
                 fail(`${actionPath}.stateId`, "Target state does not exist.");
+              if (childIds.has(action.stateId))
+                fail(
+                  `${actionPath}.stateId`,
+                  "Distance-zone state actions must target a main state, not a child sequence.",
+                );
             } else if (action.kind === "ir") {
               irReference(action.commandId, `${actionPath}.commandId`);
             } else {
@@ -663,10 +817,44 @@ export function validateProject(value: unknown): ValidationIssue[] {
   const triggers = new Set(project.triggers.map((trigger) => trigger.id));
   if (!states.has(project.initialStateId))
     fail("initialStateId", "Initial state does not exist.");
+  if (childIds.has(project.initialStateId))
+    fail("initialStateId", "A child sequence cannot be the initial state.");
   project.states.forEach((state, stateIndex) => {
     const path = `states.${stateIndex}`;
     nonempty(state.name, `${path}.name`);
     ticks(state.durationMs, 50, LIMITS.maxDurationMs, `${path}.durationMs`);
+    if (state.cooldownMs !== undefined)
+      ticks(state.cooldownMs, 0, LIMITS.maxDurationMs, `${path}.cooldownMs`);
+    if (isChildState(state)) {
+      if (!state.events.length)
+        fail(
+          `${path}.events`,
+          "A child sequence needs at least one output event.",
+        );
+      if (state.loopTimeline)
+        fail(
+          `${path}.loopTimeline`,
+          "A child sequence runs its timeline once; it cannot loop.",
+        );
+      if (state.foregroundTrack !== null)
+        fail(`${path}.foregroundTrack`, "A child sequence cannot play audio.");
+      if (state.loopAudio)
+        fail(`${path}.loopAudio`, "A child sequence cannot loop audio.");
+      if (state.irEvents?.length)
+        fail(`${path}.irEvents`, "A child sequence cannot send IR commands.");
+      if (state.transitions.length)
+        fail(
+          `${path}.transitions`,
+          "A child sequence cannot have transitions or start other children.",
+        );
+      if (state.audioEndStateId != null)
+        fail(
+          `${path}.audioEndStateId`,
+          "A child sequence cannot have an audio-end transition.",
+        );
+    } else if (state.cooldownMs !== undefined && state.cooldownMs !== 0) {
+      fail(`${path}.cooldownMs`, "Cooldown applies only to child sequences.");
+    }
     trackReference(state.foregroundTrack, `${path}.foregroundTrack`);
     integer(state.volume, 0, 30, `${path}.volume`);
     if (state.id === project.initialStateId && state.foregroundTrack !== null)
@@ -679,6 +867,11 @@ export function validateProject(value: unknown): ValidationIssue[] {
         fail(
           `${path}.audioEndStateId`,
           "Audio-end target state does not exist.",
+        );
+      if (childIds.has(state.audioEndStateId))
+        fail(
+          `${path}.audioEndStateId`,
+          "An audio-end transition must target a main state, not a child sequence.",
         );
       if (
         state.id === project.initialStateId ||
@@ -701,39 +894,105 @@ export function validateProject(value: unknown): ValidationIssue[] {
     uniqueIds(state.events, `${path}.events`);
     const irEvents = state.irEvents ?? [];
     uniqueIds(irEvents, `${path}.irEvents`);
-    const atCount = new Map<number, number>();
-    let irBusyUntil = 0;
-    [...irEvents]
-      .sort((a, b) => a.atMs - b.atMs)
-      .forEach((event) => {
-        const index = irEvents.indexOf(event);
-        const eventPath = `${path}.irEvents.${index}`;
+    let canExpandIr =
+      expandedIrEventCount(project, irEvents) <= LIMITS.irEvents &&
+      !(
+        (project.wiring === "standard-uno" || project.wiring === "fixed") &&
+        !project.ir?.enabled
+      );
+    irEvents.forEach((event, index) => {
+      const eventPath = `${path}.irEvents.${index}`;
+      ticks(
+        event.atMs,
+        0,
+        Math.max(0, state.durationMs - LIMITS.tickMs),
+        `${eventPath}.atMs`,
+      );
+      if ((event.commandId !== undefined) === (event.macroId !== undefined)) {
+        fail(eventPath, "Select exactly one IR command or macro.");
+        canExpandIr = false;
+      } else if (event.commandId !== undefined) {
         irReference(event.commandId, `${eventPath}.commandId`);
-        ticks(
-          event.atMs,
-          0,
-          Math.max(0, state.durationMs - LIMITS.tickMs),
-          `${eventPath}.atMs`,
-        );
-        const count = (atCount.get(event.atMs) ?? 0) + 1;
-        atCount.set(event.atMs, count);
-        if (count > 8)
+        if (!irCommands.has(event.commandId)) canExpandIr = false;
+      } else {
+        if (
+          !project.ir?.enabled &&
+          project.wiring !== "standard-uno" &&
+          project.wiring !== "fixed"
+        )
+          fail(
+            `${eventPath}.macroId`,
+            "Enable IR hardware before using an IR macro.",
+          );
+        const macro = irMacros.get(event.macroId!);
+        if (!macro) {
+          fail(
+            `${eventPath}.macroId`,
+            "IR macro does not exist in the project library.",
+          );
+          canExpandIr = false;
+        } else {
+          if (!macro.steps.length) canExpandIr = false;
+          macro.steps.forEach((step, stepIndex) => {
+            if (!irCommands.has(step.commandId)) canExpandIr = false;
+            if (event.atMs + step.atMs >= state.durationMs)
+              fail(
+                `${eventPath}.macroId`,
+                `Macro step ${stepIndex + 1} starts at ${event.atMs + step.atMs} ms; every step must start before the state ends (${state.durationMs} ms).`,
+              );
+          });
+        }
+      }
+    });
+    let irQueueLoads: number[] = [];
+    let irAt: number | undefined;
+    let irLastFrameUntil = 0;
+    let irBusyUntil = 0;
+    let irTransmissionMs = 0;
+    (canExpandIr ? expandIrEvents(project, state) : []).forEach((event) => {
+      const eventPath = `${path}.irEvents.${event.sourceEventIndex}`;
+      const command = irCommands.get(event.commandId);
+      if (command && validateIrSignal(command.signal)) {
+        if (event.atMs !== irAt) {
+          // All commands due on one tick enqueue before the next service.
+          // Earlier jobs may have left the queue in the meantime. A job is
+          // loaded as soon as the prior final frame finishes, even while its
+          // final quiet gap is still running. This is the optimistic drain
+          // rate; audio/sonar traffic can only delay it further.
+          irQueueLoads = irQueueLoads.filter((at) => at > event.atMs);
+          irAt = event.atMs;
+        }
+        if (irQueueLoads.length >= 8)
           fail(
             eventPath,
-            "At most eight IR commands can be queued at one time.",
+            "At most eight IR commands can be queued at one time. Space these commands farther apart or reduce repeated presses.",
           );
-        const command = irCommands.get(event.commandId);
-        if (command && validateIrSignal(command.signal)) {
-          if (event.atMs < irBusyUntil)
-            fail(
-              eventPath,
-              "This IR command overlaps a previous transmission and will wait in the send queue.",
-              "warning",
-            );
-          irBusyUntil =
-            Math.max(irBusyUntil, event.atMs) + irCommandDurationMs(command);
-        }
-      });
+        irQueueLoads.push(Math.max(event.atMs, irLastFrameUntil));
+        if (event.atMs < irBusyUntil)
+          fail(
+            eventPath,
+            "This IR command overlaps a previous transmission and will wait in the send queue.",
+            "warning",
+          );
+        const duration = irCommandDurationMs(command);
+        irTransmissionMs += duration;
+        irBusyUntil = Math.max(irBusyUntil, event.atMs) + duration;
+        irLastFrameUntil = irBusyUntil - command.gapMs;
+      }
+    });
+    if (state.loopTimeline && irTransmissionMs > state.durationMs)
+      fail(
+        `${path}.irEvents`,
+        `IR commands require at least ${Math.ceil(irTransmissionMs)} ms to transmit in each ${state.durationMs} ms loop. The send queue will overflow. Lengthen the looping timeline or reduce repeated presses.`,
+      );
+    else if (irBusyUntil > state.durationMs)
+      fail(
+        `${path}.irEvents`,
+        state.loopTimeline
+          ? "IR transmissions extend past this looping timeline. The send queue carries over between loops and can overflow when commands take longer than each loop."
+          : "IR transmissions extend past this timeline's end. They can finish while the state remains active, but a state transition cancels unsent commands.",
+        "warning",
+      );
     const byOutput = new Map<
       string,
       Array<{ start: number; end: number; index: number }>
@@ -742,6 +1001,12 @@ export function validateProject(value: unknown): ValidationIssue[] {
       const eventPath = `${path}.events.${index}`;
       if (!outputs.has(event.outputId))
         fail(`${eventPath}.outputId`, "Output channel does not exist.");
+      const owner = outputOwners.get(event.outputId);
+      if (owner && owner !== state)
+        fail(
+          `${eventPath}.outputId`,
+          `This output is exclusively reserved by child sequence "${owner.name}".`,
+        );
       ticks(event.startMs, 0, state.durationMs, `${eventPath}.startMs`);
       ticks(event.endMs, 50, state.durationMs, `${eventPath}.endMs`);
       if (event.endMs <= event.startMs)
@@ -792,13 +1057,20 @@ export function validateProject(value: unknown): ValidationIssue[] {
       if (
         transition.edge === "release" &&
         trigger &&
-        (trigger.kind === "timer" || isZonedTrigger(trigger))
+        (trigger.kind === "timer" ||
+          trigger.kind === "manual" ||
+          isZonedTrigger(trigger))
       )
         fail(
           `${transitionPath}.edge`,
           "Release transitions require a digital or single-threshold ultrasonic input.",
         );
       const targets = transitionTargets(transition);
+      if (targets.length > 1 && targets.some((id) => childIds.has(id)))
+        fail(
+          `${transitionPath}.alternateStateIds`,
+          "Round-robin transitions cannot include child sequences. Use one child destination per trigger and edge.",
+        );
       integer(
         targets.length,
         1,
@@ -827,7 +1099,7 @@ export function validateProject(value: unknown): ValidationIssue[] {
     });
   });
   integer(
-    project.states.reduce(
+    runtime.states.reduce(
       (sum, state) =>
         sum +
         state.transitions.reduce(
@@ -841,8 +1113,8 @@ export function validateProject(value: unknown): ValidationIssue[] {
     "transitions",
   );
   integer(
-    project.states.reduce(
-      (sum, state) => sum + (state.irEvents?.length ?? 0),
+    runtime.states.reduce(
+      (sum, state) => sum + expandedIrEventCount(runtime, state.irEvents ?? []),
       0,
     ),
     0,

@@ -1,5 +1,6 @@
 import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-react";
 import { isZonedTrigger, LIMITS } from "../shared/model";
+import { isChildState } from "../shared";
 import type { DistanceZone, SceneProject, ZoneAction } from "../shared/model";
 import type { EditorProps } from "./Hardware";
 
@@ -285,11 +286,13 @@ function ZoneActions({
                   edit(index, { ...action, stateId: event.target.value })
                 }
               >
-                {project.states.map((state) => (
-                  <option key={state.id} value={state.id}>
-                    {state.name}
-                  </option>
-                ))}
+                {project.states
+                  .filter((state) => !isChildState(state))
+                  .map((state) => (
+                    <option key={state.id} value={state.id}>
+                      {state.name}
+                    </option>
+                  ))}
               </select>
             </label>
           ) : action.kind === "ir" ? (

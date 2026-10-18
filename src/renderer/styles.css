@@ -1206,6 +1206,48 @@ a {
   border-color: #7cafa0;
   background: #20332c;
 }
+.ir-macros {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+  margin-top: 4px;
+}
+.ir-macros > button,
+.ir-macro > button {
+  align-self: flex-start;
+}
+.ir-macro-step {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(160px, 3fr) auto;
+  gap: 8px 12px;
+  align-items: end;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+.ir-macro-step-details {
+  grid-column: 1 / -1;
+}
+.ir-point.ir-macro-point {
+  height: 42px;
+  text-align: left;
+}
+.ir-point-label {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ir-point-label small {
+  font-size: 9px;
+  opacity: 0.8;
+}
+@media (max-width: 650px) {
+  .ir-macro-step {
+    grid-template-columns: minmax(90px, 1fr) minmax(120px, 2fr) auto;
+  }
+}
 .ir-learning-message {
   padding: 12px;
   border-radius: 6px;
@@ -1480,4 +1522,22 @@ a {
   .audio-lane {
     height: 52px;
   }
+}
+/* Child ownership stays visible alongside the parent's output indicators. */
+.output-lane.reserved .lane-track {
+  cursor: not-allowed;
+  background-color: #ffffff05;
+}
+.lane-owner {
+  display: block;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.2;
+  white-space: normal;
+}
+.preview-children {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
 }

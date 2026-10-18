@@ -16,9 +16,9 @@ static uint32_t pinReads[70] = {};
 static const uint8_t LOW = 0, HIGH = 1, INPUT = 0, OUTPUT = 1, INPUT_PULLUP = 2;
 static uint32_t millis() { return fakeMillis; }
 static uint32_t micros() { return fakeMillis * 1000; }
-static void digitalWrite(uint8_t pin, uint8_t value) { pins[pin] = value; }
-static int digitalRead(uint8_t pin) { ++pinReads[pin]; return pins[pin]; }
-static void pinMode(uint8_t pin, uint8_t mode) { if (mode == INPUT_PULLUP) pins[pin] = HIGH; }
+static void digitalWrite(uint8_t pin, uint8_t value) { assert(pin < 70); pins[pin] = value; }
+static int digitalRead(uint8_t pin) { assert(pin < 70); ++pinReads[pin]; return pins[pin]; }
+static void pinMode(uint8_t pin, uint8_t mode) { assert(pin < 70); if (mode == INPUT_PULLUP) pins[pin] = HIGH; }
 struct __FlashStringHelper {};
 #define F(value) reinterpret_cast<const __FlashStringHelper*>(value)
 struct HostSerial {
@@ -78,7 +78,7 @@ static void fixture() {
   b[148] = 'Z'; b[149] = 'N'; b[150] = 1; b[151] = 1; word(152, 4); word(154, 114);
   word(6, image.crc(156)); assert(image.valid(4096, 4));
   Serial = HostSerial{}; Serial1 = HardwareSerial{}; Serial2 = HardwareSerial{}; Serial3 = HardwareSerial{};
-  fakeMillis = 0; validScene = true; uploading = virtualMagic = beginPending = false;
+  fakeMillis = 0; pendingReports = 0; validScene = true; uploading = virtualMagic = beginPending = false;
   setupScene();
 }
 static void advance(uint32_t to) {
@@ -297,6 +297,73 @@ static void testFeedbackEchoScheduling() {
   ++fakeMillis; loop(); assert(pinReads[6] == 1); //10ms minimum polling interval.
   fakeMillis += 9; loop(); assert(pinReads[6] == 2);
 }
+static void beginPartialAudioPacket() {
+  fixture();
+  // Stop just after the PLAY command byte reaches the real audio dispatcher.
+  // The UART fake records byte times; it does not assume decoder acceptance.
+  for (; fakeMillis < 4000; ++fakeMillis) {
+    Serial1.now = Serial2.now = Serial3.now = fakeMillis;
+    audio.update(fakeMillis, false);
+    if (Serial1.bytes.size() % 10 == 4 && Serial1.bytes.back() == 0x0f) {
+      assert(!audio.transportIdle()); return;
+    }
+  }
+  assert(false);
+}
+static void testSonarWaitsForAudioPacket() {
+  beginPartialAudioPacket();
+  const size_t prefix = Serial1.bytes.size();
+  sonarNext = micros();
+  while (!audio.transportIdle()) {
+    Serial1.now = Serial2.now = Serial3.now = fakeMillis;
+    loop();
+    assert(sonarPhase == 0); // A due ping cannot split a partially sent PLAY.
+    ++fakeMillis;
+  }
+  assert(Serial1.bytes.size() == prefix + 6 && Serial1.bytes.back() == 0xef);
+  loop(); assert(sonarPhase == 1); // Sampling resumes as soon as the packet drains.
+}
+static void assertReportWindow() {
+  assert(!sonarPhase && audio.transportIdle() && !ir.transmitting());
+}
+static void testDeferredReports() {
+  fixture(); advance(4000);
+  Serial = HostSerial{}; Serial.printDelay = 1;
+  sonarPhase = 2; sonarIndex = 0; sonarAt = micros(); pins[3] = LOW;
+  const uint32_t requestedAt = fakeMillis;
+  send("STATUS"); send("HELLO");
+  assert(Serial.text.empty() && fakeMillis == requestedAt);
+  loop(); assert(sonarPhase == 2 && Serial.text.empty());
+  fakeMillis += 31; loop(); // The echo timeout, not reporting, ends the acquisition.
+  assert(!sonarPhase && Serial.text.empty());
+  afterPrint = assertReportWindow;
+  loop(); loop();
+  afterPrint = nullptr;
+  assert(Serial.text.find("\"type\":\"status\"") != std::string::npos);
+  assert(Serial.text.find("\"type\":\"hello\"") != std::string::npos);
+  assert(fakeMillis > requestedAt + 31); // Logging really stalls this test clock.
+
+  beginPartialAudioPacket();
+  Serial = HostSerial{}; Serial.printDelay = 1;
+  const uint32_t packetAt = fakeMillis;
+  send("STATUS"); assert(Serial.text.empty() && fakeMillis == packetAt);
+  sonarNext = micros() + 60000;
+  afterPrint = assertReportWindow;
+  for (uint8_t i = 0; Serial.text.empty() && i < 20; ++i) { loop(); ++fakeMillis; }
+  afterPrint = nullptr;
+  assert(Serial.text.find("\"type\":\"status\"") != std::string::npos);
+  assert(Serial1.bytes.size() % 10 == 0); // Report follows the final PLAY byte.
+
+  beginPartialAudioPacket(); Serial.text.clear();
+  send("STATUS"); assert(Serial.text.empty());
+  send("STOP");
+  assert(!engine.running && !outputMask);
+  const size_t stopAck = Serial.text.find("\"command\":\"STOP\"");
+  assert(stopAck != std::string::npos && Serial.text.find("\"type\":\"status\"") == std::string::npos);
+  for (uint8_t i = 0; i < 20 && Serial.text.find("\"type\":\"status\"") == std::string::npos; ++i) { loop(); ++fakeMillis; }
+  assert(Serial.text.find("\"type\":\"status\"") > stopAck);
+  assert(Serial.text.find("\"running\":false") != std::string::npos);
+}
 static void feedbackControllerFixture() {
   fixture(); EEPROM.bytes[3] = '2';
   EEPROM.bytes[51] = 7; EEPROM.bytes[55] = 8; EEPROM.bytes[59] = 9;
@@ -331,11 +398,124 @@ static void testAudioEndControllerPriority() {
   Serial.text.clear(); send("STATUS");
   assert(Serial.text.find("\"feedback\":\"failed\",\"busy\":false") != std::string::npos);
 }
+static void loadParallelFixture(const char* path) {
+  stop(); memset(EEPROM.bytes, 0, sizeof(EEPROM.bytes));
+  FILE* file = fopen(path, "rb"); assert(file);
+  const size_t length = fread(EEPROM.bytes, 1, sizeof(EEPROM.bytes), file); fclose(file);
+  assert(length == 188);
+  // Controller tests use three hardware UART fakes. Convert only board/pins;
+  // the native core test validates the unmodified Uno compiler fixture too.
+  EEPROM.bytes[8] = 4; EEPROM.bytes[image.player(0) + 1] = 18; EEPROM.bytes[image.player(0) + 2] = 19;
+  word(6, image.crc(static_cast<uint16_t>(length))); assert(image.valid(4096, 4));
+  Serial = HostSerial{}; Serial1 = HardwareSerial{}; Serial2 = HardwareSerial{}; Serial3 = HardwareSerial{};
+  fakeMillis = 0; validScene = true; uploading = virtualMagic = beginPending = false; setupScene();
+}
+static void controllerAdvance(uint32_t to) {
+  while (fakeMillis < to) {
+    Serial1.now = Serial2.now = Serial3.now = fakeMillis;
+    loop(); ++fakeMillis;
+  }
+  loop();
+}
+static void approachReady(const char* path) {
+  loadParallelFixture(path); controllerAdvance(4000); send("TRIGGER 0"); controllerAdvance(5000);
+  assert(engine.currentState == 1 && engine.enteredAt == 4000 && outputMask == 1);
+  assert(Serial1.bytes.size() % 10 == 0);
+}
+static void testParallelControllerAndAudio(const char* path) {
+  approachReady(path);
+  const size_t audioBytes = Serial1.bytes.size();
+  Serial.text.clear(); send("TRIGGER 1");
+  assert(outputMask == 3 && pins[9] == HIGH); // Manual launch writes child outputs immediately.
+  assert(engine.currentState == 1 && engine.enteredAt == 4000 && engine.activeChildren() == 8);
+  assert(Serial.text.find("\"type\":\"state\"") == std::string::npos);
+  send("STATUS");
+  assert(Serial.text.find("\"activeChildren\":8,\"coolingChildren\":0") != std::string::npos);
+  assert(Serial.text.find("\"parallelChildren\":true") != std::string::npos);
+  assert(Serial.text.find("\"firmware\":\"0.7.2\"") != std::string::npos);
+  controllerAdvance(5100); send("TRIGGER 2"); controllerAdvance(5200); assert(outputMask == 7);
+  controllerAdvance(5249); assert(outputMask == 7);
+  controllerAdvance(5250); assert(outputMask == 5 && pins[9] == LOW);
+  Serial.text.clear(); send("STATUS");
+  assert(Serial.text.find("\"activeChildren\":16,\"coolingChildren\":8") != std::string::npos);
+  controllerAdvance(5500); assert(outputMask == 0); // Parent and second pulse retain their own deadlines.
+  controllerAdvance(6000); assert(Serial1.bytes.size() == audioBytes); // No STOP/PLAY/volume/loop packet from children.
+  assert(engine.currentState == 1 && engine.enteredAt == 4000);
+  send("TRIGGER 1"); assert(engine.childAt[3] == 5000); // Ignored during cooldown.
+  controllerAdvance(7250); send("TRIGGER 1"); assert(engine.childAt[3] == 7250 && pins[9] == HIGH);
+  send("TRIGGER 3"); assert(engine.currentState == 2 && pins[9] == HIGH && engine.activeChildren() == 8);
+  controllerAdvance(7500); assert(pins[9] == LOW); // Parent transition did not restart the pulse.
+  send("STOP"); assert(!engine.busyChildren && !outputMask && !engine.running);
+
+  approachReady(path); const size_t physicalAudioBytes = Serial1.bytes.size();
+  pins[8] = LOW; loop(); assert(pins[9] == HIGH && engine.currentState == 1 && engine.enteredAt == 4000);
+  pins[8] = HIGH; ++fakeMillis; loop();
+  controllerAdvance(5250); assert(pins[9] == LOW && Serial1.bytes.size() == physicalAudioBytes);
+  // RUN/RESET cancel both running and cooling children, clearing all leases.
+  send("RESET"); assert(!engine.busyChildren && !outputMask && engine.currentState == 0);
+  send("TRIGGER 0"); send("TRIGGER 1"); assert(engine.activeChildren() == 8);
+  send("RUN"); assert(!engine.busyChildren && !outputMask && engine.currentState == 0);
+  send("TRIGGER 0"); send("TRIGGER 1"); beginTest();
+  assert(testingOutputs && !engine.running && !engine.busyChildren && !outputMask);
+  send("TEST 2"); assert(outputMask == 2 && !engine.busyChildren);
+  send("STOP"); assert(!testingOutputs && !outputMask);
+}
+static void testCpc3UploadCancelsChildren(const char* path) {
+  approachReady(path); send("TRIGGER 1"); assert(engine.activeChildren() == 8);
+  uint8_t saved[188]; memcpy(saved, EEPROM.bytes, sizeof(saved));
+  const uint16_t length = image.u16(4), crc = image.u16(6);
+  char text[96]; sprintf(text, "BEGIN %u %u", length, crc); send(text);
+  assert(!engine.running && !engine.busyChildren && !outputMask && uploading && !validScene);
+  controllerAdvance(6000); assert(!beginPending);
+  for (uint16_t offset = 0; offset < length;) {
+    const uint8_t count = length - offset > 32 ? 32 : static_cast<uint8_t>(length - offset);
+    int written = sprintf(text, "DATA %u ", offset);
+    for (uint8_t i = 0; i < count; ++i) written += sprintf(text + written, "%02x", saved[offset + i]);
+    send(text); offset += count;
+  }
+  assert(uploadVersion == '3' && image.b(3) == '3' && EEPROM.bytes[0] == 0);
+  send("COMMIT"); assert(validScene && !uploading && !virtualMagic && engine.running);
+  assert(!engine.busyChildren && !outputMask && engine.currentState == 0);
+  assert(!memcmp(saved, EEPROM.bytes, sizeof(saved)) && image.valid(4096, 4));
+}
+static void testManualAdvanceWithIndependentBeam(const char* path) {
+  loadParallelFixture(path); stop();
+  const uint16_t manual = image.trigger(0), length = image.u16(4);
+  memset(EEPROM.bytes + manual, 0, 8);
+  EEPROM.bytes[manual] = 4; EEPROM.bytes[manual + 1] = EEPROM.bytes[manual + 2] = 255;
+  // One app-only trigger advances idle -> approach -> outro -> idle. The beam
+  // remains a separate physical input and never owns a main-state transition.
+  EEPROM.bytes[image.transition(3)] = 0;
+  EEPROM.bytes[length] = 0; EEPROM.bytes[length + 1] = 0;
+  ++EEPROM.bytes[image.state(2) + 10];
+  for (uint8_t i = 3; i < image.b(12); ++i) word(image.state(i) + 8, image.u16(image.state(i) + 8) + 1);
+  word(4, length + 2); word(6, image.crc(length + 2)); assert(image.valid(4096, 4));
+  Serial = HostSerial{}; Serial1 = HardwareSerial{}; Serial2 = HardwareSerial{}; Serial3 = HardwareSerial{};
+  fakeMillis = 0; memset(pinReads, 0, sizeof(pinReads)); setupScene();
+  controllerAdvance(4000); assert(engine.currentState == 0 && !engine.busyChildren && !pinReads[4]);
+  pins[8] = LOW; loop(); assert(engine.currentState == 0 && !engine.busyChildren);
+  pins[8] = HIGH; ++fakeMillis; loop();
+  send("HELLO"); assert(Serial.text.find("\"manualTriggers\":true") != std::string::npos);
+  fakeMillis = 4100; send("TRIGGER 0"); controllerAdvance(5000);
+  assert(engine.currentState == 1 && engine.enteredAt == 4100);
+  const size_t audioBytes = Serial1.bytes.size();
+  pins[8] = LOW; loop(); assert(engine.currentState == 1 && engine.enteredAt == 4100 && pins[9] == HIGH);
+  pins[8] = HIGH; ++fakeMillis; loop(); controllerAdvance(5100);
+  assert(Serial1.bytes.size() == audioBytes); // Beam preserves the approach audio.
+  send("TRIGGER 0"); assert(engine.currentState == 2 && engine.activeChildren() == 8 && pins[9] == HIGH);
+  controllerAdvance(5250); assert(pins[9] == LOW && engine.currentState == 2);
+  send("TRIGGER 0"); assert(engine.currentState == 0);
+  controllerAdvance(6000); assert(engine.currentState == 0 && !pinReads[4]);
+  send("RESET"); assert(engine.currentState == 0 && !engine.busyChildren && !pinReads[4]);
+  send("STOP"); send("TRIGGER 0"); assert(!engine.running && engine.currentState == 0);
+  Serial.text.clear(); send("STATUS"); assert(Serial.text.find("\"manualTriggers\":true") != std::string::npos);
+}
 int main(int argc, char** argv) {
   testOrderedActionTimestamps(); testCommandsAndResetBaseline(); testResidentFadeTimestamp();
   if (argc > 1) { testIrCommands(argv[1]); testIrCompletionTimestamps(argv[1]); }
   testOutputTestMode(); testCpc2UploadCommit();
-  testFeedbackEchoScheduling();
+  testFeedbackEchoScheduling(); testSonarWaitsForAudioPacket(); testDeferredReports();
   testAudioEndControllerPriority();
-  puts("Controller host tests passed: output-test identity/watchdog/polarity/EEPROM preservation, CPC2 upload, BUSY/sonar scheduling and end priority, ordered timestamps, RESET/RUN baseline, IR learning/staged playback, STOP cancellation.");
+  if (argc > 2) { testParallelControllerAndAudio(argv[2]); testCpc3UploadCancelsChildren(argv[2]); testManualAdvanceWithIndependentBeam(argv[2]); }
+  puts("Controller host tests passed: output-test identity/watchdog/polarity/EEPROM preservation, CPC2/CPC3 upload, parallel physical/manual triggers with uninterrupted foreground packets/timeline, STOP/reset/upload/test child cancellation, sonar/MP3 packet arbitration, deferred reports and priority STOP, BUSY scheduling and end priority, ordered timestamps, RESET/RUN baseline, IR learning/staged playback.");
 }

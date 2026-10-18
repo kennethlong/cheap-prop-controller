@@ -8,6 +8,8 @@ import {
 } from "../shared";
 import type { EditorProps } from "./Hardware";
 import { useDevice } from "./DeviceContext";
+import { IrMacrosEditor } from "./IrMacrosEditor";
+import { irPins } from "../shared/boards";
 
 export function signalDescription(signal: IrSignal): string {
   return signal.kind === "nec"
@@ -109,6 +111,16 @@ export function IrLibrary({
     }
   };
   const remove = (command: IrCommand) => {
+    const referencingMacros = (project.ir?.macros ?? []).filter((macro) =>
+      macro.steps.some((step) => step.commandId === command.id),
+    );
+    if (referencingMacros.length) {
+      notify(
+        `Cannot delete “${command.name}”: used by ${referencingMacros.map((macro) => `“${macro.name}”`).join(", ")}. Remove or replace those macro steps first.`,
+        true,
+      );
+      return;
+    }
     const uses =
       project.states.reduce(
         (sum, state) =>
@@ -185,11 +197,28 @@ export function IrLibrary({
                 commands: [],
               };
               next.ir.enabled = event.target.checked;
+              if (next.wiring === "fixed" && event.target.checked)
+                Object.assign(next.ir, irPins(next.board));
             })
           }
         />
         Enable IR remote control
       </label>
+      {project.wiring === "standard-uno" && (
+        <p className="hint">
+          The standard harness reserves receiver D2 and transmitter D9 even when
+          IR is disabled. Enabling IR does not move any other connection.
+        </p>
+      )}
+      {project.wiring === "fixed" && (
+        <p className="hint">
+          IR uses receiver D2 and transmitter{" "}
+          {project.board === "mega" ? "D11" : "D9"} while enabled. With IR
+          disabled, these pins can be assigned to other devices. Enabling IR
+          requires those pins to be free; existing connections are never moved
+          automatically.
+        </p>
+      )}
       {enabled && (
         <>
           <div className="row">
@@ -205,6 +234,11 @@ export function IrLibrary({
             minimum gap also separates different queued commands.
           </p>
           <p className="hint">{connectionHint}</p>
+          <p className="hint">
+            Capture a button, give it a name such as Candles on or Brightness +,
+            test it, then save it. Repeat for each button you want to use in a
+            timeline or reusable macro.
+          </p>
           <div className="row">
             <button
               className="primary"
@@ -353,6 +387,12 @@ export function IrLibrary({
           deploy or test its actions.
         </p>
       )}
+      <IrMacrosEditor
+        project={project}
+        change={change}
+        confirm={confirm}
+        disabled={!!busy}
+      />
     </section>
   );
 }
@@ -375,6 +415,7 @@ function CommandFields({
         <input
           aria-label={`${prefix} name`}
           value={command.name}
+          maxLength={200}
           disabled={disabled}
           onChange={(event) =>
             onChange({ ...command, name: event.target.value })

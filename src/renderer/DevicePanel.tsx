@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronUp,
@@ -12,8 +12,10 @@ import {
 } from "lucide-react";
 import type { DeviceReply, PortInfo } from "../desktop-api";
 import type { SceneProject } from "../shared/model";
-import { BOARD_PROFILES } from "../shared/boards";
+import { BOARD_PROFILES, pinLabel } from "../shared/boards";
+import { toRuntimeProject } from "../shared/standard-harness";
 import { useDevice } from "./DeviceContext";
+import { createDelayedArm, type ArmingProgress } from "./delayed-arm";
 
 interface Props {
   project: SceneProject;
@@ -30,10 +32,26 @@ export function DevicePanel({
   workspaceKey,
   notify,
 }: Props) {
+  const runtime = toRuntimeProject(project);
+  const sceneKey = bytes.join(",");
+  const [verifiedScene, setVerifiedScene] = useState<{
+    key: string;
+    port?: string;
+  } | null>(null);
+  const needsSceneVerification =
+    project.wiring === "standard-uno" ||
+    project.wiring === "fixed" ||
+    project.outputs.some((output) => output.enabled !== undefined) ||
+    project.triggers.some((trigger) => trigger.enabled !== undefined);
   const [ports, setPorts] = useState<PortInfo[]>([]);
   const [port, setPort] = useState("");
   const { status, setStatus, busy, run } = useDevice();
   const connected = status.connected;
+  const triggerSceneVerified =
+    !needsSceneVerification ||
+    (valid &&
+      verifiedScene?.key === sceneKey &&
+      verifiedScene?.port === status.port);
   const [logs, setLogs] = useState<string[]>([]);
   const [showLogs, setShowLogs] = useState(false);
   const [showFlash, setShowFlash] = useState(false);
@@ -41,6 +59,9 @@ export function DevicePanel({
   const [testing, setTesting] = useState(false);
   const [testMask, setTestMask] = useState(0);
   const [feedback, setFeedback] = useState<DeviceReply | null>(null);
+  const [arming, setArming] = useState<ArmingProgress | null>(null);
+  const delayedArm = useRef<ReturnType<typeof createDelayedArm> | null>(null);
+  const armingConnection = useRef<{ port?: string } | null>(null);
   const testActive = useRef(false);
   const testPending = useRef(false);
   const desiredMask = useRef(0);
@@ -53,7 +74,11 @@ export function DevicePanel({
   const [variant, setVariant] = useState<"default" | "old-bootloader">(
     "default",
   );
-  const [trigger, setTrigger] = useState("0");
+  const [triggerId, setTrigger] = useState("");
+  const selectedTrigger =
+    runtime.triggers.find((item) => item.id === triggerId) ??
+    runtime.triggers.find((item) => item.kind === "manual") ??
+    runtime.triggers[0];
   const addLog = (line: string) =>
     setLogs((old) => [
       ...old.slice(-149),
@@ -76,6 +101,12 @@ export function DevicePanel({
     if (!window.cpc) return;
     const offLog = window.cpc.onDeviceLog(addLog);
     const offStatus = window.cpc.onDeviceStatus((status) => {
+      if (!status.connected) setVerifiedScene(null);
+      if (
+        armingConnection.current &&
+        (!status.connected || status.port !== armingConnection.current.port)
+      )
+        cancelArming();
       if (status.port) setPort(status.port);
     });
     return () => {
@@ -92,8 +123,9 @@ export function DevicePanel({
       notify(String(error).replace(/^Error: /, ""), true);
     }
   };
-  const command = (value: string) =>
-    action(value, async () => {
+  const command = (value: string) => {
+    if (value === "STOP") cancelArming(false);
+    return action(value, async () => {
       if (value === "STOP") resetTest();
       const result =
         value === "STOP"
@@ -106,6 +138,61 @@ export function DevicePanel({
           String(result.message ?? result.error ?? "Device rejected command"),
         );
     });
+  };
+  const cancelArming = (stopPendingReset = true) => {
+    const pending = delayedArm.current;
+    delayedArm.current = null;
+    armingConnection.current = null;
+    if (!pending) return;
+    const resetting = pending.cancel();
+    setArming(null);
+    // RESET may already be on the wire. STOP has serial priority and leaves the
+    // controller stopped even if cancellation races the final acknowledgement.
+    if (resetting && stopPendingReset && window.cpc) void command("STOP");
+  };
+  const beginDelayedArm = () =>
+    void action("Delayed arming", async () => {
+      const pending = createDelayedArm({
+        stop: async () => {
+          const reply = await window.cpc!.cancelIr();
+          addLog(`Delayed arm STOP: ${JSON.stringify(reply)}`);
+          return reply;
+        },
+        reset: async () => {
+          const reply = await window.cpc!.deviceCommand("RESET");
+          addLog(`Delayed arm RESET: ${JSON.stringify(reply)}`);
+          return reply;
+        },
+        progress: (value) => {
+          if (delayedArm.current === pending) setArming(value);
+        },
+      });
+      delayedArm.current = pending;
+      armingConnection.current = { port: status.port };
+      try {
+        if (await pending.run())
+          notify("Controller reset and armed after the 15-second exit delay.");
+      } finally {
+        if (delayedArm.current === pending) {
+          delayedArm.current = null;
+          armingConnection.current = null;
+          setArming(null);
+        }
+      }
+    });
+  useLayoutEffect(() => {
+    cancelArming();
+  }, [workspaceKey, project, bytes.join(","), connected, status.port]);
+  useEffect(() => {
+    const leaving = () => cancelArming();
+    window.addEventListener("pagehide", leaving);
+    window.addEventListener("beforeunload", leaving);
+    return () => {
+      window.removeEventListener("pagehide", leaving);
+      window.removeEventListener("beforeunload", leaving);
+      cancelArming();
+    };
+  }, []);
   const resetTest = () => {
     testEpoch.current++;
     testActive.current = false;
@@ -174,6 +261,7 @@ export function DevicePanel({
       try {
         await window.cpc!.beginOutputTest(bytes);
         if (epoch !== testEpoch.current) return;
+        setVerifiedScene({ key: sceneKey, port: status.port });
         testPending.current = false;
         testActive.current = true;
         setTesting(true);
@@ -203,6 +291,9 @@ export function DevicePanel({
   useEffect(() => {
     void stopTests();
   }, [workspaceKey, bytes.join(","), connected]);
+  useEffect(() => {
+    setVerifiedScene(null);
+  }, [connected, status.port, sceneKey]);
   useEffect(() => {
     if (
       !showLogs ||
@@ -314,6 +405,7 @@ export function DevicePanel({
                     throw new Error(
                       String(reply.message ?? reply.error ?? "Upload rejected"),
                     );
+                  setVerifiedScene({ key: sceneKey, port: status.port });
                   addLog(`Scene uploaded: ${JSON.stringify(reply)}`);
                   notify(
                     "Scene uploaded to onboard storage. The controller is now running its initial state.",
@@ -330,6 +422,13 @@ export function DevicePanel({
               title="Return the physical controller to its initial state and arm its triggers"
             >
               Arm / reset
+            </button>
+            <button
+              disabled={!connected || !!busy}
+              onClick={beginDelayedArm}
+              title="Stop the controller, wait 15 seconds for you to leave, then reset and arm its triggers"
+            >
+              Reset &amp; arm in 15 s
             </button>
             <button
               className="danger"
@@ -356,7 +455,7 @@ export function DevicePanel({
                 setShowTests((old) => !old);
               }}
             >
-              Test outputs
+              {showTests ? "Exit Test Outputs" : "Test outputs"}
             </button>
           </>
         ) : (
@@ -374,6 +473,22 @@ export function DevicePanel({
           {showLogs ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
         </button>
       </div>
+      {arming && (
+        <div className="row" style={{ padding: "0 17px 12px" }}>
+          <strong role="status" aria-label="Delayed arming">
+            {arming.phase === "stopping"
+              ? "Stopping controller…"
+              : arming.phase === "countdown"
+                ? `Arming in ${arming.seconds} s`
+                : "Arming controller…"}
+          </strong>
+          <button onClick={() => cancelArming()}>Cancel arming</button>
+          <span className="hint">
+            Keep the app open and USB connected. Outputs and audio stay stopped
+            during the countdown. Let the PIR clear before arming.
+          </span>
+        </div>
+      )}
       {showTests && (
         <section className="hardware-testing" aria-label="Manual output test">
           <div className="row">
@@ -433,11 +548,14 @@ export function DevicePanel({
             </p>
           )}
           <div className="test-output-grid">
-            {project.outputs.map((output, index) => (
+            {runtime.outputs.map((output, index) => (
               <div className="test-output" key={output.id}>
                 <span>
                   {output.name}
-                  <small className="hint"> · D{output.pin}</small>
+                  <small className="hint">
+                    {" "}
+                    · {pinLabel(project.board, output.pin)}
+                  </small>
                 </span>
                 <button
                   aria-label={`Hold physical ${output.name}`}
@@ -498,23 +616,46 @@ export function DevicePanel({
           <div className="row" style={{ padding: "0 17px 8px" }}>
             <span className="section-label">Hardware test</span>
             <select
-              aria-label="Physical trigger"
-              style={{ width: 170 }}
-              value={trigger}
+              aria-label="Controller trigger"
+              style={{ width: 220 }}
+              value={selectedTrigger?.id ?? ""}
               onChange={(e) => setTrigger(e.target.value)}
             >
-              {project.triggers.map((item, index) => (
-                <option value={index} key={item.id}>
+              {runtime.triggers.map((item) => (
+                <option value={item.id} key={item.id}>
                   {item.name}
+                  {item.kind === "manual" ? " (app)" : ""}
                 </option>
               ))}
             </select>
             <button
-              disabled={!connected || !!busy || !project.triggers.length}
-              onClick={() => void command(`TRIGGER ${trigger}`)}
+              disabled={
+                !connected ||
+                !!busy ||
+                !selectedTrigger ||
+                !triggerSceneVerified
+              }
+              title={
+                !triggerSceneVerified
+                  ? "Upload the current scene first so trigger numbers match the controller."
+                  : selectedTrigger
+                    ? `Send ${selectedTrigger.name} to the controller`
+                    : undefined
+              }
+              onClick={() => {
+                if (selectedTrigger && triggerSceneVerified)
+                  void command(
+                    `TRIGGER ${runtime.triggers.indexOf(selectedTrigger)}`,
+                  );
+              }}
             >
               Send trigger
             </button>
+            {needsSceneVerification && !triggerSceneVerified && (
+              <span className="hint">
+                Upload this scene on this connection before sending triggers.
+              </span>
+            )}
             <button
               disabled={!connected || !!busy}
               onClick={() => void command("STATUS")}
@@ -531,6 +672,31 @@ export function DevicePanel({
               ? logs.join("\n")
               : "No serial connection opened. Connect explicitly when the controller is ready."}
           </pre>
+          {typeof feedback?.activeChildren === "number" && (
+            <div
+              className="preview-children"
+              aria-label="Controller child activity"
+            >
+              {runtime.states.map((state, index) => {
+                const active =
+                  ((Number(feedback.activeChildren) >>> index) & 1) !== 0;
+                const cooling =
+                  ((Number(feedback.coolingChildren ?? 0) >>> index) & 1) !== 0;
+                return active || cooling ? (
+                  <span
+                    className={`badge ${active ? "green" : "amber"}`}
+                    key={state.id}
+                  >
+                    {state.name} · {active ? "Running" : "Cooldown"}
+                  </span>
+                ) : null;
+              })}
+              <span className="hint">
+                Last reported child activity. Short pulses may finish between
+                status updates.
+              </span>
+            </div>
+          )}
           {Array.isArray(feedback?.players) && (
             <div
               className="preview-audio-levels"

@@ -1,7 +1,14 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 #define __AVR_ATmega2560__
+#define ARDUINO 10819
+// Exercise the real Mega transmit-complete checks without changing the shared
+// serial fake. Ordinary tests model immediate writes; drain tests hold TXC low.
+static uint8_t UCSR1A = 1, UCSR2A = 1, UCSR3A = 1;
+enum { TXC1 = 0, TXC2 = 0, TXC3 = 0 };
+#define _BV(bit) (1 << (bit))
 #include "audio_engine.hpp"
 #include "audio_feedback.hpp"
 HardwareSerial Serial1, Serial2, Serial3;
@@ -22,6 +29,7 @@ static void fixture() {
   word(62, 2); bytes[71] = 25; word(78, 3); bytes[87] = 30;
   word(6, image.crc(92)); assert(image.valid(4096, 4));
   Serial1 = HardwareSerial{}; Serial2 = HardwareSerial{}; Serial3 = HardwareSerial{};
+  UCSR1A = UCSR2A = UCSR3A = 1;
 }
 static size_t packetLength(const HardwareSerial& port) {
   const uint8_t player = &port == &Serial1 ? 0 : &port == &Serial2 ? 1 : 2;
@@ -73,6 +81,69 @@ static void sequentialFixture(bool persistent = false, uint16_t fadeOut = 150, u
   bytes[17] = static_cast<uint8_t>(fadeIn / 50); bytes[19] = static_cast<uint8_t>(fadeOut / 50);
   word(4, length); word(26, stateOffset); word(28, length); word(30, length);
   word(6, image.crc(length)); assert(image.valid(4096, 4));
+}
+static void testCommandRecoveryAfterTransport() {
+  // A USB STATUS print can stall the main loop in the middle of a packet.
+  // Decoder recovery begins after its final byte, never at packet creation.
+  for (uint8_t kind = 0; kind < 2; ++kind) for (uint8_t command = 0; command < 2; ++command) {
+    sequentialFixture(false, 0, 0); bytes[32] = kind;
+    cpc::AudioEngine engine;
+    engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, 3000);
+    const uint8_t current = command ? 0x0f : 0x09, next = command ? 0x19 : 0x16;
+    const uint32_t packetAt = commandAt(Serial1, current, command ? 0x0101 : 2);
+    sequentialFixture(false, 0, 0); bytes[32] = kind;
+    engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, packetAt + 3);
+    const size_t packetOffset = Serial1.bytes.size() - 3;
+    assert(Serial1.bytes[packetOffset] == 0x7e);
+    advance(engine, packetAt + 43, 3500); // 40 ms main-loop stall; no UART bytes lost.
+    const uint32_t completed = Serial1.emittedAt[packetOffset + packetLength(Serial1) - 1];
+    const uint32_t nextAt = commandAt(Serial1, next, 0, packetAt);
+    assert(nextAt >= completed + (command ? 60U : 250U));
+    assert(nextAt < completed + (command ? 70U : 260U)); // No arbitrary extra delay.
+  }
+
+  // Mega write() may only enqueue the final byte. TXC, not buffer acceptance,
+  // starts the recovery interval, even when the main loop keeps running.
+  sequentialFixture(false, 0, 0);
+  cpc::AudioEngine engine;
+  engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, 3000);
+  const uint32_t playAt = commandAt(Serial1, 0x0f, 0x0101);
+  sequentialFixture(false, 0, 0);
+  engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, playAt + 3);
+  UCSR1A = 0;
+  advance(engine, playAt + 3, playAt + 110);
+  assert(commands(Serial1, 0x0f, 0x0101) == 1);
+  assert(commands(Serial1, 0x19, 0) == 0 && !engine.transportIdle());
+  UCSR1A = 1;
+  advance(engine, playAt + 110, playAt + 170);
+  assert(commands(Serial1, 0x19, 0) == 0);
+  advance(engine, playAt + 170, playAt + 200);
+  assert(commandAt(Serial1, 0x19, 0) >= playAt + 170);
+
+  // STOP while PLAY is on the wire preserves framing and decoder recovery,
+  // then reaches STOP promptly without ever sending LOOP or raising volume.
+  sequentialFixture(false, 0, 0);
+  engine.begin(&image, 0); engine.enter(0, 0); advance(engine, 0, playAt + 3);
+  engine.stop(playAt + 3); UCSR1A = 0;
+  advance(engine, playAt + 3, playAt + 20);
+  assert(commands(Serial1, 0x0f, 0x0101) == 1 && !engine.stopped());
+  assert(commandAt(Serial1, 0x16, 0, playAt) == UINT32_MAX);
+  UCSR1A = 1;
+  advance(engine, playAt + 20, playAt + 80);
+  assert(commandAt(Serial1, 0x16, 0, playAt) == UINT32_MAX);
+  advance(engine, playAt + 80, playAt + 91);
+  const uint32_t stopAt = commandAt(Serial1, 0x16, 0, playAt);
+  assert(stopAt >= playAt + 80 && stopAt <= playAt + 82);
+  // Final STOP byte is queued, but shutdown is not acknowledged until actual
+  // drain and its recovery deadline have been recorded by update().
+  UCSR1A = 0;
+  assert(!engine.stopped() && !engine.transportIdle());
+  advance(engine, playAt + 91, playAt + 110);
+  UCSR1A = 1;
+  assert(engine.transportIdle() && !engine.stopped());
+  advance(engine, playAt + 110, playAt + 200);
+  assert(engine.stopped() && commands(Serial1, 0x19, 0) == 0);
+  assert(commands(Serial1, 0x06, 20) == 0);
 }
 static void testSequentialDurations() {
   sequentialFixture();
@@ -126,9 +197,11 @@ static void testSequentialLatestAndStop() {
   // Enter during fade-in: fade from current level and cancel pending target on STOP.
   engine.enter(1, 5100); advance(engine, 5100, 6050);
   assert(commands(Serial1, 0x0f, 0x0102) == 1);
-  assert(commandAt(Serial1, 0x06, 25, 5100) == UINT32_MAX);
+  const uint32_t incomingPlay = commandAt(Serial1, 0x0f, 0x0102);
+  // The outgoing track's 30 -> 0 fade can also pass through volume 25.
+  assert(commandAt(Serial1, 0x06, 25, incomingPlay) == UINT32_MAX);
   engine.stop(6050); advance(engine, 6050, 7000); assert(engine.stopped());
-  assert(commandAt(Serial1, 0x06, 25, 5100) == UINT32_MAX);
+  assert(commandAt(Serial1, 0x06, 25, incomingPlay) == UINT32_MAX);
   engine.enter(0, 7000); advance(engine, 7000, 8500);
   engine.enter(1, 8500); advance(engine, 8500, 8700);
   engine.stop(8700); advance(engine, 8700, 9600); assert(engine.stopped());
@@ -409,7 +482,17 @@ static void testVolumeActions() {
     engine.enter(2, 6000); engine.volume(1, 7, 100, 6000); advance(engine, 6000, 7500);
     const HardwareSerial& incoming = mode ? Serial2 : Serial3;
     assert(commandAt(incoming, 0x06, 7, 6000) != UINT32_MAX);
-    if (!mode) assert(commandAt(Serial2, 0x06, 7, 6000) == UINT32_MAX); // Never raise retiring voice.
+    if (!mode) {
+      // Retiring 12 -> 0 may legitimately pass through the incoming target 7;
+      // verify it never rises instead of forbidding that intermediate value.
+      uint8_t retiringVolume = 12;
+      for (size_t at = 0; at + packetLength(Serial2) <= Serial2.bytes.size(); at += packetLength(Serial2))
+        if (Serial2.emittedAt[at] >= 6000 && Serial2.bytes[at + 3] == 0x06) {
+          assert(Serial2.bytes[at + 6] <= retiringVolume);
+          retiringVolume = Serial2.bytes[at + 6];
+        }
+      assert(retiringVolume == 0);
+    }
     assert(commandAt(Serial1, 0x06, 8, 6000) != UINT32_MAX); // State entry clears ambient override.
     engine.enter(0, 7500); advance(engine, 7500, 9000);
     assert(commandAt(Serial1, 0x06, 20, 7500) != UINT32_MAX);
@@ -533,6 +616,7 @@ static void testAudioFeedbackRouting() {
   assert(engine.takeForegroundFinished());
 }
 int main() {
+  testCommandRecoveryAfterTransport();
   testBusyFeedbackPrimitive();
   testAudioFeedbackRouting();
   fixture(); cpc::AudioEngine engine;
@@ -569,5 +653,5 @@ int main() {
   testSequentialDurations(); testSequentialLatestAndStop(); testSequentialPersistentAmbient(); testSequentialPacketCancellation();
   testMixedAmbientTransitions(); testMixedLatestAndStop(); testMixedStartupAndCancellation();
   testVolumeActions(); testVolumePendingAndZeroDefaults();
-  puts("Audio host tests passed: BUSY debounce/start timeout/foreground routing, role-volume actions, packet retirement, crossfade/cut/sequential fades, ambient mixing, startup, STOP, echo scheduling.");
+  puts("Audio host tests passed: completion-anchored recovery, buffered UART drain/STOP, BUSY debounce/start timeout/foreground routing, role-volume actions, packet retirement, crossfade/cut/sequential fades, ambient mixing, startup, STOP, echo scheduling.");
 }

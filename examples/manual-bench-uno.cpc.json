@@ -1,0 +1,173 @@
+{
+  "version": 1,
+  "name": "USB bench - 4 relays and 3 YX5300 players",
+  "board": "uno",
+  "wiring": "relay-shield",
+  "initialStateId": "idle",
+  "outputs": [
+    {
+      "id": "output-1",
+      "name": "Relay 1",
+      "pin": 7,
+      "activeLow": false,
+      "idleActive": false,
+      "color": "#f87171"
+    },
+    {
+      "id": "output-2",
+      "name": "Relay 2",
+      "pin": 6,
+      "activeLow": false,
+      "idleActive": false,
+      "color": "#4ade80"
+    },
+    {
+      "id": "output-3",
+      "name": "Relay 3",
+      "pin": 5,
+      "activeLow": false,
+      "idleActive": false,
+      "color": "#60a5fa"
+    },
+    {
+      "id": "output-4",
+      "name": "Relay 4",
+      "pin": 4,
+      "activeLow": false,
+      "idleActive": false,
+      "color": "#facc15"
+    }
+  ],
+  "triggers": [
+    {
+      "id": "next",
+      "name": "Next audio state",
+      "kind": "button",
+      "pin": 12,
+      "echoPin": null,
+      "activeLow": true,
+      "pullup": true,
+      "debounceMs": 100,
+      "thresholdCm": 100,
+      "hysteresisCm": 20
+    }
+  ],
+  "audio": {
+    "players": [
+      {
+        "id": "player-1",
+        "kind": "yx5300",
+        "txPin": 2,
+        "rxPin": 3
+      },
+      {
+        "id": "player-2",
+        "kind": "yx5300",
+        "txPin": 8,
+        "rxPin": 9
+      },
+      {
+        "id": "player-3",
+        "kind": "yx5300",
+        "txPin": 10,
+        "rxPin": 11
+      }
+    ],
+    "ambientTrack": 1,
+    "ambientVolume": 12,
+    "keepAmbient": true,
+    "ambientMixVolume": 4,
+    "transitionMode": "crossfade",
+    "fadeMs": 750,
+    "tracks": [
+      {
+        "number": 1,
+        "name": "Ambient (001.mp3)"
+      },
+      {
+        "number": 2,
+        "name": "Foreground A (002.mp3)"
+      },
+      {
+        "number": 3,
+        "name": "Foreground B (003.mp3)"
+      }
+    ]
+  },
+  "states": [
+    {
+      "id": "idle",
+      "name": "1 - Ambient only",
+      "durationMs": 10000,
+      "loopTimeline": true,
+      "foregroundTrack": null,
+      "volume": 25,
+      "loopAudio": false,
+      "events": [],
+      "transitions": [
+        {
+          "triggerId": "next",
+          "targetStateId": "track-2"
+        }
+      ]
+    },
+    {
+      "id": "track-2",
+      "name": "2 - Track 2 and relays 1-2",
+      "durationMs": 10000,
+      "loopTimeline": false,
+      "foregroundTrack": 2,
+      "volume": 15,
+      "loopAudio": true,
+      "events": [
+        {
+          "id": "relay-1-pulse",
+          "outputId": "output-1",
+          "startMs": 0,
+          "endMs": 1000
+        },
+        {
+          "id": "relay-2-pulse",
+          "outputId": "output-2",
+          "startMs": 1500,
+          "endMs": 2500
+        }
+      ],
+      "transitions": [
+        {
+          "triggerId": "next",
+          "targetStateId": "track-3"
+        }
+      ]
+    },
+    {
+      "id": "track-3",
+      "name": "3 - Track 3 and relays 3-4",
+      "durationMs": 10000,
+      "loopTimeline": false,
+      "foregroundTrack": 3,
+      "volume": 15,
+      "loopAudio": true,
+      "events": [
+        {
+          "id": "relay-3-pulse",
+          "outputId": "output-3",
+          "startMs": 0,
+          "endMs": 1000
+        },
+        {
+          "id": "relay-4-pulse",
+          "outputId": "output-4",
+          "startMs": 1500,
+          "endMs": 2500
+        }
+      ],
+      "transitions": [
+        {
+          "triggerId": "next",
+          "targetStateId": "idle"
+        }
+      ]
+    }
+  ]
+}

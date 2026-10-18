@@ -151,7 +151,7 @@ test("IR library learns, tests, names timeline and zone actions, persists, renam
     .getByRole("button", { name: /Idle/ })
     .click();
   await page
-    .getByRole("button", { name: "Add IR command", exact: true })
+    .getByRole("button", { name: "Add IR event", exact: true })
     .click();
   await page.getByLabel("IR event time seconds").fill("0.25");
   await expect(
@@ -171,7 +171,7 @@ test("IR library learns, tests, names timeline and zone actions, persists, renam
     }),
   ).toBeVisible();
   await page
-    .getByRole("button", { name: "Add IR command", exact: true })
+    .getByRole("button", { name: "Add IR event", exact: true })
     .click();
   await page.getByLabel("IR event time seconds").fill("0.35");
   const firstPoint = page.getByRole("button", {
@@ -726,7 +726,7 @@ test("preview follows the three-state scene and shows active outputs", async ({
   expect(errors).toEqual([]);
 });
 
-test("draw, edit, delete, undo, save, and reopen a timeline event", async ({
+test("draw, edit, delete, undo, redo, save, and reopen a timeline event", async ({
   page,
 }) => {
   await page.goto("/");
@@ -745,6 +745,23 @@ test("draw, edit, delete, undo, save, and reopen a timeline event", async ({
     exact: true,
   });
   await expect(event).toBeVisible();
+  const duration = page.getByLabel("Event duration milliseconds");
+  const end = page.getByLabel("Event end seconds");
+  await duration.selectOption("250");
+  await duration.selectOption("450");
+  await expect(page.getByLabel("Event start seconds")).toHaveValue("2");
+  await expect(end).toHaveValue("2.45");
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(duration).toHaveValue("250");
+  await expect(end).toHaveValue("2.25");
+  await page.getByRole("button", { name: "Redo", exact: true }).click();
+  await expect(duration).toHaveValue("450");
+  await expect(end).toHaveValue("2.45");
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(end).toHaveValue("2.25");
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(duration).toHaveValue("custom");
+  await expect(end).toHaveValue("4");
   await page.getByRole("button", { name: "Delete event", exact: true }).click();
   await expect(event).toHaveCount(0);
   await page.getByRole("button", { name: "Undo", exact: true }).click();

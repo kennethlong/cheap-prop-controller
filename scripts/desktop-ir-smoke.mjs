@@ -215,11 +215,11 @@ try {
     .getByRole("button", { name: /Idle/ })
     .click();
   await page
-    .getByRole("button", { name: "Add IR command", exact: true })
+    .getByRole("button", { name: "Add IR event", exact: true })
     .click();
   await page.getByLabel("IR event time seconds").fill("0.1");
   await page
-    .getByRole("button", { name: "Add IR command", exact: true })
+    .getByRole("button", { name: "Add IR event", exact: true })
     .click();
   await page.getByLabel("IR event command").selectOption({ label: "Dim down" });
   await page.getByLabel("IR event time seconds").fill("0.5");

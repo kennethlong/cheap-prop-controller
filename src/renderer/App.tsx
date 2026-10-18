@@ -27,6 +27,9 @@ import {
   createSimulator,
   createState,
   getMediaClip,
+  irEventName,
+  irMacroDurationMs,
+  isChildState,
   isZonedTrigger,
   LIMITS,
   parseProject,
@@ -44,9 +47,11 @@ import { Timeline, time } from "./Timeline";
 import { PreviewAudio } from "./audio";
 import { useDevice } from "./DeviceContext";
 import { PerformanceRecorder } from "./PerformanceRecorder";
+import { outputUnavailableReason } from "./outputOwnership";
 
 const initial = createDefaultProject();
 const errorText = (error: unknown) => String(error).replace(/^Error: /, "");
+const EVENT_DURATION_PRESETS = [100, 150, 200, 250, 300, 350, 400, 450, 500];
 
 export function App() {
   const device = useDevice();
@@ -114,8 +119,43 @@ export function App() {
   const state =
     project.states.find((item) => item.id === selectedStateId) ??
     project.states[0];
+  const child = isChildState(state);
+  const selectedChild = snapshot?.children.find((item) => item.id === state.id);
+  const editableOutputs = project.outputs.filter(
+    (output) => !outputUnavailableReason(project, state, output.id),
+  );
   const event = state.events.find((item) => item.id === selectedEventId);
+  const eventDuration = event ? event.endMs - event.startMs : 0;
+  const simpleChildPulse =
+    child && state.events.length === 1 && event?.startMs === 0;
+  const canSetEventDuration = (durationMs: number) =>
+    !!event &&
+    (event.startMs + durationMs <= state.durationMs || simpleChildPulse) &&
+    !state.events.some(
+      (other) =>
+        other.id !== event.id &&
+        other.outputId === event.outputId &&
+        event.startMs < other.endMs &&
+        event.startMs + durationMs > other.startMs,
+    );
   const irEvent = state.irEvents?.find((item) => item.id === selectedIrEventId);
+  const selectedIrMacro =
+    irEvent?.macroId !== undefined
+      ? project.ir?.macros?.find((macro) => macro.id === irEvent.macroId)
+      : undefined;
+  const selectedIrCommand =
+    irEvent?.commandId !== undefined
+      ? project.ir?.commands.find((command) => command.id === irEvent.commandId)
+      : undefined;
+  const irEventTarget = irEvent
+    ? JSON.stringify(
+        irEvent.macroId !== undefined
+          ? ["macro", irEvent.macroId]
+          : ["command", irEvent.commandId ?? ""],
+      )
+    : "";
+  const missingIrTarget =
+    irEvent?.macroId !== undefined ? !selectedIrMacro : !selectedIrCommand;
   useEffect(() => {
     setSelectedIrEventId(null);
   }, [selectedStateId]);
@@ -165,9 +205,9 @@ export function App() {
     }
     const previous = projectRef.current;
     const next = structuredClone(previous);
-    recipe(next);
     let allocated: SceneProject;
     try {
+      recipe(next);
       allocated = synchronizeAudioPlayers(next);
     } catch (error) {
       notify(errorText(error), true);
@@ -186,7 +226,8 @@ export function App() {
     if (!history.length) return;
     stopPreview();
     const previous = history[history.length - 1];
-    setFuture((old) => [projectRef.current, ...old]);
+    const current = projectRef.current;
+    setFuture((old) => [current, ...old]);
     setHistory((old) => old.slice(0, -1));
     projectRef.current = previous;
     setProject(previous);
@@ -198,7 +239,8 @@ export function App() {
     if (!future.length) return;
     stopPreview();
     const next = future[0];
-    setHistory((old) => [...old, projectRef.current]);
+    const current = projectRef.current;
+    setHistory((old) => [...old, current]);
     setFuture((old) => old.slice(1));
     projectRef.current = next;
     setProject(next);
@@ -400,6 +442,7 @@ export function App() {
   };
   const triggerPreview = (id: string) => {
     if (!simulator.current) return;
+    const previousStateId = simulator.current.snapshot().stateId;
     if (simulator.current.trigger(id)) {
       const next = simulator.current.snapshot();
       if (running) applySnapshot(next);
@@ -408,8 +451,10 @@ export function App() {
         setSnapshot(next);
         setPosition(next.elapsedMs);
       }
-      setSelectedStateId(next.stateId);
-      setSelectedEventId(null);
+      if (next.stateId !== previousStateId) {
+        setSelectedStateId(next.stateId);
+        setSelectedEventId(null);
+      }
     }
   };
   const distancePreview = (id: string, distanceCm: number | null) => {
@@ -857,9 +902,21 @@ export function App() {
           Media
         </button>
         <div className="tab-context">
-          <span>{project.outputs.length} outputs</span>
+          <span>
+            {
+              project.outputs.filter((output) => output.enabled !== false)
+                .length
+            }{" "}
+            outputs
+          </span>
           <span>·</span>
-          <span>{project.triggers.length} triggers</span>
+          <span>
+            {
+              project.triggers.filter((trigger) => trigger.enabled !== false)
+                .length
+            }{" "}
+            triggers
+          </span>
           <span className={`badge ${errors.length ? "amber" : "green"}`}>
             {errors.length ? `${errors.length} to resolve` : "Ready to preview"}
           </span>
@@ -895,9 +952,11 @@ export function App() {
                     </div>
                     <div className="state-meta">
                       <span>
-                        {item.id === project.initialStateId
-                          ? "INITIAL"
-                          : `${item.events.length + (item.irEvents?.length ?? 0)} events`}
+                        {isChildState(item)
+                          ? "CHILD · PARALLEL"
+                          : item.id === project.initialStateId
+                            ? "INITIAL"
+                            : `${item.events.length + (item.irEvents?.length ?? 0)} events`}
                       </span>
                       <span>
                         {item.durationMs / 1000}s
@@ -924,14 +983,62 @@ export function App() {
                 <Plus size={14} />
                 Add state
               </button>
+              <button
+                className="ghost"
+                disabled={
+                  project.states.length >= LIMITS.states || !!device.busy
+                }
+                onClick={() => {
+                  const id = crypto.randomUUID();
+                  const nextChild = {
+                    ...createState(
+                      id,
+                      `Child ${project.states.filter(isChildState).length + 1}`,
+                    ),
+                    kind: "child" as const,
+                    durationMs: 250,
+                    cooldownMs: 2000,
+                  };
+                  const output = project.outputs.find(
+                    (item) =>
+                      !outputUnavailableReason(project, nextChild, item.id),
+                  );
+                  if (!output) {
+                    notify(
+                      "A child needs an output that is off at idle and unused by all other timelines. Add an output in Hardware or remove its existing events first.",
+                      true,
+                    );
+                    return;
+                  }
+                  const eventId = crypto.randomUUID();
+                  nextChild.events = [
+                    {
+                      id: eventId,
+                      outputId: output.id,
+                      startMs: 0,
+                      endMs: 250,
+                      active: true,
+                    },
+                  ];
+                  change((next) => {
+                    next.states.push(nextChild);
+                  });
+                  setSelectedStateId(id);
+                  setSelectedEventId(eventId);
+                }}
+              >
+                <Plus size={14} />
+                Add child sequence
+              </button>
               <div className="divider" />
               <div className="sidebar-heading">
                 <div className="section-label" style={{ marginBottom: 10 }}>
                   How it flows
                 </div>
                 <p className="state-trigger-note">
-                  Each state has its own timeline. A trigger moves the scene to
-                  another state and starts that timeline.
+                  Main states run the show. A trigger can go to another state or
+                  run a child sequence alongside it, keeping the main timeline
+                  and audio playing.
                 </p>
               </div>
               <div className="sidebar-footer">
@@ -975,6 +1082,7 @@ export function App() {
                 <div className="grow">
                   <div className="row">
                     <h2>{state.name}</h2>
+                    {child && <span className="badge">Parallel child</span>}
                     {state.id === project.initialStateId && (
                       <span className="badge green">Initial state</span>
                     )}
@@ -982,22 +1090,28 @@ export function App() {
                   <p>
                     {state.events.length + (state.irEvents?.length ?? 0)} events
                     · {project.outputs.length} channels ·{" "}
-                    {state.loopTimeline
-                      ? "Repeating timeline"
-                      : "Holds idle outputs after timeline"}
+                    {child
+                      ? "One-shot output sequence"
+                      : state.loopTimeline
+                        ? "Repeating timeline"
+                        : "Holds idle outputs after timeline"}
                   </p>
                 </div>
-                <button
-                  disabled={
-                    !!device.busy || !!errors.length || !project.outputs.length
-                  }
-                  onClick={() => {
-                    stopPreview();
-                    setRecording(true);
-                  }}
-                >
-                  Record performance
-                </button>
+                {!child && (
+                  <button
+                    disabled={
+                      !!device.busy ||
+                      !!errors.length ||
+                      !editableOutputs.length
+                    }
+                    onClick={() => {
+                      stopPreview();
+                      setRecording(true);
+                    }}
+                  >
+                    Record performance
+                  </button>
+                )}
                 <button
                   className="icon ghost"
                   disabled={!history.length}
@@ -1031,23 +1145,49 @@ export function App() {
                   setSelectedEventId(null);
                 }}
                 onAddIr={(atMs) => {
+                  if (child) return;
                   const command = project.ir?.commands[0];
-                  if (!command) return;
+                  const macro = project.ir?.macros?.[0];
+                  if (!command && !macro) return;
                   const id = crypto.randomUUID();
                   updateState((next) => {
                     next.irEvents ??= [];
-                    next.irEvents.push({ id, atMs, commandId: command.id });
+                    next.irEvents.push(
+                      command
+                        ? { id, atMs, commandId: command.id }
+                        : { id, atMs, macroId: macro!.id },
+                    );
                   });
                   setSelectedEventId(null);
                   setSelectedIrEventId(id);
                 }}
                 onEvents={(events) =>
                   updateState((next) => {
-                    next.events = events;
+                    next.events = [
+                      ...next.events.filter((event) =>
+                        project.outputs.some(
+                          (output) =>
+                            output.id === event.outputId &&
+                            output.enabled === false,
+                        ),
+                      ),
+                      ...events.filter(
+                        (event) =>
+                          !outputUnavailableReason(
+                            project,
+                            state,
+                            event.outputId,
+                          ),
+                      ),
+                    ];
                   })
                 }
                 position={
-                  snapshot?.stateId === state.id || !started ? position : 0
+                  child && started
+                    ? Math.min(state.durationMs, selectedChild?.elapsedMs ?? 0)
+                    : snapshot?.stateId === state.id || !started
+                      ? position
+                      : 0
                 }
                 onSeek={(ms) => {
                   if (!running) setPosition(ms);
@@ -1065,15 +1205,19 @@ export function App() {
                   state.id === project.initialStateId || state.loopAudio
                 }
                 previewState={snapshot?.stateName ?? "Idle"}
+                previewElapsedMs={snapshot?.elapsedMs ?? 0}
+                previewChildren={snapshot?.children ?? []}
                 onTrigger={triggerPreview}
                 canFinishAudio={!!activeState?.audioEndStateId}
                 onRelease={(id) => {
+                  const previousStateId = simulator.current?.snapshot().stateId;
                   if (simulator.current?.release(id)) {
                     const next = simulator.current.snapshot();
                     if (running) applySnapshot(next);
                     else {
                       setSnapshot(next);
-                      setSelectedStateId(next.stateId);
+                      if (next.stateId !== previousStateId)
+                        setSelectedStateId(next.stateId);
                       setPosition(next.elapsedMs);
                     }
                   }
@@ -1103,7 +1247,7 @@ export function App() {
               {irEvent ? (
                 <>
                   <div className="row between">
-                    <span className="section-label">Selected IR command</span>
+                    <span className="section-label">Selected IR event</span>
                     <button
                       className="ghost small"
                       onClick={() => setSelectedIrEventId(null)}
@@ -1112,23 +1256,51 @@ export function App() {
                     </button>
                   </div>
                   <label>
-                    IR command
+                    Named command or macro
                     <select
                       aria-label="IR event command"
-                      value={irEvent.commandId}
+                      value={irEventTarget}
                       onChange={(event) =>
                         updateState((next) => {
-                          next.irEvents!.find(
+                          const target = next.irEvents!.find(
                             (item) => item.id === irEvent.id,
-                          )!.commandId = event.target.value;
+                          )!;
+                          const [kind, id] = JSON.parse(event.target.value) as [
+                            "command" | "macro",
+                            string,
+                          ];
+                          delete target.commandId;
+                          delete target.macroId;
+                          if (kind === "macro") target.macroId = id;
+                          else target.commandId = id;
                         })
                       }
                     >
-                      {(project.ir?.commands ?? []).map((command) => (
-                        <option key={command.id} value={command.id}>
-                          {command.name}
+                      {missingIrTarget && (
+                        <option value={irEventTarget}>
+                          {irEventName(project, irEvent)}
                         </option>
-                      ))}
+                      )}
+                      <optgroup label="Named commands">
+                        {(project.ir?.commands ?? []).map((command) => (
+                          <option
+                            key={command.id}
+                            value={JSON.stringify(["command", command.id])}
+                          >
+                            {command.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                      <optgroup label="Macros">
+                        {(project.ir?.macros ?? []).map((macro) => (
+                          <option
+                            key={macro.id}
+                            value={JSON.stringify(["macro", macro.id])}
+                          >
+                            {macro.name}
+                          </option>
+                        ))}
+                      </optgroup>
                     </select>
                   </label>
                   <label>
@@ -1137,7 +1309,19 @@ export function App() {
                       aria-label="IR event time seconds"
                       type="number"
                       min="0"
-                      max={(state.durationMs - 50) / 1000}
+                      max={
+                        Math.max(
+                          0,
+                          state.durationMs -
+                            LIMITS.tickMs -
+                            Math.max(
+                              0,
+                              ...(selectedIrMacro?.steps.map(
+                                (step) => step.atMs,
+                              ) ?? []),
+                            ),
+                        ) / 1000
+                      }
                       step="0.05"
                       value={irEvent.atMs / 1000}
                       onChange={(event) =>
@@ -1151,9 +1335,16 @@ export function App() {
                     />
                   </label>
                   <p className="hint">
-                    Sends this named command once at the selected point. Its
-                    complete-press count and gap come from the IR library in
-                    Hardware.
+                    {irEvent.macroId !== undefined
+                      ? selectedIrMacro
+                        ? `${selectedIrMacro.steps.length} steps over approximately ${(irMacroDurationMs(selectedIrMacro, project.ir?.commands ?? []) / 1000).toFixed(2)} seconds. Step offsets are relative to this event, and every step must start before the state ends. Edit the reusable macro in Hardware; changes apply to every use.`
+                        : "This macro is missing. Choose an existing macro or named command."
+                      : "Sends this named command at the selected point. Its complete-press count and gap come from the IR library in Hardware."}
+                  </p>
+                  <p className="hint">
+                    Changing state or stopping cancels remaining IR steps and
+                    queued presses. Add an Off command to destination states
+                    that should leave your prop off.
                   </p>
                   <button
                     className="danger"
@@ -1202,8 +1393,17 @@ export function App() {
                       }
                     >
                       {project.outputs.map((output) => (
-                        <option key={output.id} value={output.id}>
+                        <option
+                          key={output.id}
+                          value={output.id}
+                          disabled={
+                            !!outputUnavailableReason(project, state, output.id)
+                          }
+                        >
                           {output.name}
+                          {outputUnavailableReason(project, state, output.id)
+                            ? ` · ${outputUnavailableReason(project, state, output.id)}`
+                            : ""}
                         </option>
                       ))}
                     </select>
@@ -1248,6 +1448,53 @@ export function App() {
                       />
                     </label>
                   </div>
+                  <label>
+                    Duration (milliseconds)
+                    <select
+                      aria-label="Event duration milliseconds"
+                      value={
+                        EVENT_DURATION_PRESETS.includes(eventDuration)
+                          ? eventDuration
+                          : "custom"
+                      }
+                      onChange={(e) => {
+                        const durationMs = Number(e.target.value);
+                        if (
+                          !EVENT_DURATION_PRESETS.includes(durationMs) ||
+                          !canSetEventDuration(durationMs)
+                        )
+                          return;
+                        updateState((next) => {
+                          const selected = next.events.find(
+                            (item) => item.id === event.id,
+                          )!;
+                          if (simpleChildPulse) next.durationMs = durationMs;
+                          selected.endMs = selected.startMs + durationMs;
+                        });
+                      }}
+                    >
+                      {!EVENT_DURATION_PRESETS.includes(eventDuration) && (
+                        <option value="custom" disabled>
+                          Custom ({eventDuration} ms)
+                        </option>
+                      )}
+                      {EVENT_DURATION_PRESETS.map((durationMs) => (
+                        <option
+                          key={durationMs}
+                          value={durationMs}
+                          disabled={!canSetEventDuration(durationMs)}
+                        >
+                          {durationMs} ms
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <p className="hint">
+                    {simpleChildPulse
+                      ? "Changes the pulse and child timeline length together, so cooldown starts when the pulse ends. "
+                      : "Keeps the start time. Unavailable durations would overlap another event or extend past the timeline. "}
+                    Use Start and End for other lengths.
+                  </p>
                   <label>
                     During this interval
                     <select
@@ -1296,13 +1543,15 @@ export function App() {
                 </>
               ) : (
                 <div className="row between">
-                  <span className="section-label">State settings</span>
+                  <span className="section-label">
+                    {child ? "Child sequence settings" : "State settings"}
+                  </span>
                   <Settings2 size={15} className="muted" />
                 </div>
               )}
               <div className="inspector-section">
                 <label>
-                  State name
+                  {child ? "Child sequence name" : "State name"}
                   <input
                     aria-label="State name"
                     value={state.name}
@@ -1333,382 +1582,477 @@ export function App() {
                       }
                     />
                   </label>
-                  <label
-                    style={{ justifyContent: "flex-end" }}
-                    className="check"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={state.loopTimeline}
-                      onChange={(e) =>
-                        updateState((next) => {
-                          next.loopTimeline = e.target.checked;
-                        })
-                      }
-                    />
-                    Loop timeline
-                  </label>
-                </div>
-                <label className="check">
-                  <input
-                    type="checkbox"
-                    checked={state.id === project.initialStateId}
-                    disabled={state.id === project.initialStateId}
-                    onChange={() =>
-                      change((next) => {
-                        next.initialStateId = state.id;
-                        next.states.find(
-                          (item) => item.id === state.id,
-                        )!.foregroundTrack = null;
-                        next.states.find(
-                          (item) => item.id === state.id,
-                        )!.audioEndStateId = null;
-                      })
-                    }
-                  />
-                  Initial / reset state
-                </label>
-              </div>
-              <div className="divider" />
-              <div className="inspector-section">
-                <div className="row">
-                  <AudioLines size={14} className="muted" />
-                  <span className="section-label">State audio</span>
-                </div>
-                {state.id === project.initialStateId ? (
-                  <p className="hint">
-                    This state plays the ambient track. Configure it in{" "}
-                    <button
-                      className="ghost small"
-                      style={{
-                        minHeight: 20,
-                        padding: "0 3px",
-                        color: "var(--accent)",
-                      }}
-                      onClick={() => setTab("media")}
+                  {!child && (
+                    <label
+                      style={{ justifyContent: "flex-end" }}
+                      className="check"
                     >
-                      Media
-                    </button>
-                    .
-                  </p>
-                ) : (
-                  <>
-                    <TrackSelect
-                      project={project}
-                      value={state.foregroundTrack}
-                      label="Foreground track"
-                      onChange={(value) =>
-                        updateState((next) => {
-                          next.foregroundTrack = value;
-                        })
-                      }
-                    />
-                    <div className="field-grid">
-                      <label>
-                        Volume (0–30)
-                        <input
-                          type="number"
-                          min="0"
-                          max="30"
-                          value={state.volume}
-                          onChange={(e) =>
-                            updateState((next) => {
-                              next.volume = Number(e.target.value);
-                            })
-                          }
-                        />
-                      </label>
-                      <label
-                        className="check"
-                        style={{ justifyContent: "flex-end" }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={state.loopAudio}
-                          onChange={(e) =>
-                            updateState((next) => {
-                              next.loopAudio = e.target.checked;
-                            })
-                          }
-                        />
-                        Loop audio
-                      </label>
-                    </div>
-                  </>
-                )}
-              </div>
-              {state.id !== project.initialStateId && (
-                <label>
-                  When foreground audio finishes
-                  <select
-                    aria-label="Audio finished target"
-                    value={state.audioEndStateId ?? ""}
-                    onChange={(event) =>
-                      updateState((next) => {
-                        next.audioEndStateId = event.target.value || null;
-                      })
-                    }
-                  >
-                    <option value="">Keep this state</option>
-                    {project.states.map((target) => (
-                      <option value={target.id} key={target.id}>
-                        {target.name}
-                      </option>
-                    ))}
-                  </select>
-                  <span className="hint">
-                    Requires BUSY feedback on every player and a non-looping
-                    foreground track. Preview uses the linked track length or
-                    the Finish audio button.
-                  </span>
-                </label>
-              )}
-              <div className="divider" />
-              <div className="inspector-section">
-                <div className="row between">
-                  <span className="section-label">Trigger transitions</span>
-                  <GitBranch size={14} className="muted" />
-                </div>
-                {state.transitions.map((transition, index) => (
-                  <div className="transition-row" key={`${state.id}-${index}`}>
-                    <div className="row">
-                      <label className="grow">
-                        Input
-                        <select
-                          aria-label={`Transition ${index + 1} trigger`}
-                          value={transition.triggerId}
-                          onChange={(e) =>
-                            updateState((next) => {
-                              next.transitions[index].triggerId =
-                                e.target.value;
-                              const trigger = project.triggers.find(
-                                (item) => item.id === e.target.value,
-                              );
-                              if (
-                                trigger?.kind === "timer" ||
-                                (trigger && isZonedTrigger(trigger))
-                              )
-                                next.transitions[index].edge = "activate";
-                            })
-                          }
-                        >
-                          {project.triggers
-                            .filter(
-                              (trigger) =>
-                                !isZonedTrigger(trigger) ||
-                                trigger.id === transition.triggerId,
-                            )
-                            .map((trigger) => (
-                              <option key={trigger.id} value={trigger.id}>
-                                {trigger.name}
-                                {isZonedTrigger(trigger)
-                                  ? " (inactive: distance zones)"
-                                  : ""}
-                              </option>
-                            ))}
-                        </select>
-                      </label>
-                      <button
-                        className="icon ghost"
-                        aria-label={`Delete transition ${index + 1}`}
-                        onClick={() =>
-                          updateState((next) => {
-                            next.transitions.splice(index, 1);
-                          })
-                        }
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
-                    <label>
-                      Respond on
-                      <select
-                        aria-label={`Transition ${index + 1} edge`}
-                        value={transition.edge ?? "activate"}
-                        onChange={(event) =>
-                          updateState((next) => {
-                            next.transitions[index].edge = event.target
-                              .value as "activate" | "release";
-                          })
-                        }
-                      >
-                        <option value="activate">Activation</option>
-                        <option
-                          value="release"
-                          disabled={project.triggers.some(
-                            (trigger) =>
-                              trigger.id === transition.triggerId &&
-                              (trigger.kind === "timer" ||
-                                isZonedTrigger(trigger)),
-                          )}
-                        >
-                          Release
-                        </option>
-                      </select>
-                    </label>
-                    <div className="row">
-                      <ArrowRight size={14} className="muted" />
-                      <select
-                        aria-label={`Transition ${index + 1} target state`}
-                        value={transition.targetStateId}
-                        onChange={(e) =>
-                          updateState((next) => {
-                            next.transitions[index].targetStateId =
-                              e.target.value;
-                            next.transitions[index].alternateStateIds =
-                              next.transitions[index].alternateStateIds?.filter(
-                                (id) => id !== e.target.value,
-                              );
-                          })
-                        }
-                      >
-                        {project.states.map((target) => (
-                          <option key={target.id} value={target.id}>
-                            {target.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <label className="check">
                       <input
                         type="checkbox"
-                        aria-label={`Transition ${index + 1} cycle variants`}
-                        checked={!!transition.alternateStateIds}
-                        onChange={(event) =>
+                        checked={state.loopTimeline}
+                        onChange={(e) =>
                           updateState((next) => {
-                            if (event.target.checked)
-                              next.transitions[index].alternateStateIds = [];
-                            else
-                              delete next.transitions[index].alternateStateIds;
+                            next.loopTimeline = e.target.checked;
                           })
                         }
                       />
-                      Cycle through scene variants
+                      Loop timeline
                     </label>
-                    {transition.alternateStateIds && (
-                      <div className="transition-targets">
-                        <span className="hint">
-                          Starts with the target above, then these states in the
-                          order selected. Arm / reset starts over.
-                        </span>
-                        {project.states
-                          .filter(
-                            (target) => target.id !== transition.targetStateId,
-                          )
-                          .map((target) => (
-                            <label className="check" key={target.id}>
-                              <input
-                                aria-label={`Transition ${index + 1} variant ${target.name}`}
-                                type="checkbox"
-                                checked={transition.alternateStateIds!.includes(
-                                  target.id,
-                                )}
-                                onChange={(event) =>
-                                  updateState((next) => {
-                                    const t = next.transitions[index];
-                                    t.alternateStateIds = event.target.checked
-                                      ? [
-                                          ...(t.alternateStateIds ?? []),
-                                          target.id,
-                                        ]
-                                      : t.alternateStateIds?.filter(
-                                          (id) => id !== target.id,
-                                        );
-                                  })
-                                }
-                              />
-                              {target.name}
-                            </label>
-                          ))}
-                        <span className="hint">
-                          Order:{" "}
-                          {[
-                            transition.targetStateId,
-                            ...transition.alternateStateIds,
-                          ]
-                            .map(
-                              (id) =>
-                                project.states.find(
-                                  (target) => target.id === id,
-                                )?.name,
-                            )
-                            .join(" → ")}
-                        </span>
-                      </div>
-                    )}
-                    {project.triggers.some(
-                      (trigger) =>
-                        trigger.id === transition.triggerId &&
-                        isZonedTrigger(trigger),
-                    ) && (
+                  )}
+                </div>
+                {child && (
+                  <>
+                    <label>
+                      Cooldown after finish (seconds)
+                      <input
+                        aria-label="Child cooldown seconds"
+                        type="number"
+                        min="0"
+                        max="3276.75"
+                        step="0.05"
+                        value={(state.cooldownMs ?? 0) / 1000}
+                        onChange={(event) =>
+                          updateState((next) => {
+                            next.cooldownMs = Math.max(
+                              0,
+                              Math.round(Number(event.target.value) * 20) * 50,
+                            );
+                          })
+                        }
+                      />
+                    </label>
+                    <p className="hint">
+                      Runs once alongside the main show. Triggers during the
+                      timeline and cooldown are ignored. Main state changes keep
+                      this child running; STOP and reset cancel it.
+                    </p>
+                    <p className="hint">
+                      To launch it, choose this child in a main state's trigger
+                      transitions.
+                    </p>
+                    <p className="hint" data-testid="child-output-ownership">
+                      Exclusively owns:{" "}
+                      {project.outputs
+                        .filter((output) =>
+                          state.events.some(
+                            (event) => event.outputId === output.id,
+                          ),
+                        )
+                        .map((output) => output.name)
+                        .join(", ") || "Add an output event"}
+                      . These outputs stay off when this child is inactive.
+                    </p>
+                  </>
+                )}
+                {!child && (
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={state.id === project.initialStateId}
+                      disabled={state.id === project.initialStateId}
+                      onChange={() =>
+                        change((next) => {
+                          next.initialStateId = state.id;
+                          next.states.find(
+                            (item) => item.id === state.id,
+                          )!.foregroundTrack = null;
+                          next.states.find(
+                            (item) => item.id === state.id,
+                          )!.audioEndStateId = null;
+                        })
+                      }
+                    />
+                    Initial / reset state
+                  </label>
+                )}
+              </div>
+              {!child && (
+                <>
+                  <div className="divider" />
+                  <div className="inspector-section">
+                    <div className="row">
+                      <AudioLines size={14} className="muted" />
+                      <span className="section-label">State audio</span>
+                    </div>
+                    {state.id === project.initialStateId ? (
                       <p className="hint">
-                        Inactive while this sensor uses distance zones. Edit its
-                        actions in Hardware; switching back to a single
-                        threshold restores this transition.
+                        This state plays the ambient track. Configure it in{" "}
+                        <button
+                          className="ghost small"
+                          style={{
+                            minHeight: 20,
+                            padding: "0 3px",
+                            color: "var(--accent)",
+                          }}
+                          onClick={() => setTab("media")}
+                        >
+                          Media
+                        </button>
+                        .
                       </p>
+                    ) : (
+                      <>
+                        <TrackSelect
+                          project={project}
+                          value={state.foregroundTrack}
+                          label="Foreground track"
+                          onChange={(value) =>
+                            updateState((next) => {
+                              next.foregroundTrack = value;
+                            })
+                          }
+                        />
+                        <div className="field-grid">
+                          <label>
+                            Volume (0–30)
+                            <input
+                              type="number"
+                              min="0"
+                              max="30"
+                              value={state.volume}
+                              onChange={(e) =>
+                                updateState((next) => {
+                                  next.volume = Number(e.target.value);
+                                })
+                              }
+                            />
+                          </label>
+                          <label
+                            className="check"
+                            style={{ justifyContent: "flex-end" }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={state.loopAudio}
+                              onChange={(e) =>
+                                updateState((next) => {
+                                  next.loopAudio = e.target.checked;
+                                })
+                              }
+                            />
+                            Loop audio
+                          </label>
+                        </div>
+                      </>
                     )}
                   </div>
-                ))}
-                <button
-                  className="ghost"
-                  disabled={
-                    !project.triggers.some(
-                      (trigger) =>
-                        !isZonedTrigger(trigger) &&
-                        (!state.transitions.some(
-                          (t) =>
-                            t.triggerId === trigger.id &&
-                            (t.edge ?? "activate") === "activate",
-                        ) ||
-                          (trigger.kind !== "timer" &&
-                            !state.transitions.some(
+                  {state.id !== project.initialStateId && (
+                    <label>
+                      When foreground audio finishes
+                      <select
+                        aria-label="Audio finished target"
+                        value={state.audioEndStateId ?? ""}
+                        onChange={(event) =>
+                          updateState((next) => {
+                            next.audioEndStateId = event.target.value || null;
+                          })
+                        }
+                      >
+                        <option value="">Keep this state</option>
+                        {project.states
+                          .filter((target) => !isChildState(target))
+                          .map((target) => (
+                            <option value={target.id} key={target.id}>
+                              {target.name}
+                            </option>
+                          ))}
+                      </select>
+                      <span className="hint">
+                        Requires BUSY feedback on every player and a non-looping
+                        foreground track. Preview uses the linked track length
+                        or the Finish audio button.
+                      </span>
+                    </label>
+                  )}
+                  <div className="divider" />
+                  <div className="inspector-section">
+                    <div className="row between">
+                      <span className="section-label">Trigger transitions</span>
+                      <GitBranch size={14} className="muted" />
+                    </div>
+                    {state.transitions.map((transition, index) => (
+                      <div
+                        className="transition-row"
+                        key={`${state.id}-${index}`}
+                      >
+                        <div className="row">
+                          <label className="grow">
+                            Input
+                            <select
+                              aria-label={`Transition ${index + 1} trigger`}
+                              value={transition.triggerId}
+                              onChange={(e) =>
+                                updateState((next) => {
+                                  next.transitions[index].triggerId =
+                                    e.target.value;
+                                  const trigger = project.triggers.find(
+                                    (item) => item.id === e.target.value,
+                                  );
+                                  if (
+                                    trigger?.kind === "timer" ||
+                                    trigger?.kind === "manual" ||
+                                    (trigger && isZonedTrigger(trigger))
+                                  )
+                                    next.transitions[index].edge = "activate";
+                                })
+                              }
+                            >
+                              {project.triggers
+                                .filter(
+                                  (trigger) =>
+                                    !isZonedTrigger(trigger) ||
+                                    trigger.id === transition.triggerId,
+                                )
+                                .map((trigger) => (
+                                  <option key={trigger.id} value={trigger.id}>
+                                    {trigger.name}
+                                    {trigger.enabled === false
+                                      ? " (disabled)"
+                                      : ""}
+                                    {isZonedTrigger(trigger)
+                                      ? " (inactive: distance zones)"
+                                      : ""}
+                                  </option>
+                                ))}
+                            </select>
+                          </label>
+                          <button
+                            className="icon ghost"
+                            aria-label={`Delete transition ${index + 1}`}
+                            onClick={() =>
+                              updateState((next) => {
+                                next.transitions.splice(index, 1);
+                              })
+                            }
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                        <label>
+                          Respond on
+                          <select
+                            aria-label={`Transition ${index + 1} edge`}
+                            value={transition.edge ?? "activate"}
+                            onChange={(event) =>
+                              updateState((next) => {
+                                next.transitions[index].edge = event.target
+                                  .value as "activate" | "release";
+                              })
+                            }
+                          >
+                            <option value="activate">Activation</option>
+                            {!project.triggers.some(
+                              (trigger) =>
+                                trigger.id === transition.triggerId &&
+                                trigger.kind === "manual",
+                            ) && (
+                              <option
+                                value="release"
+                                disabled={project.triggers.some(
+                                  (trigger) =>
+                                    trigger.id === transition.triggerId &&
+                                    (trigger.kind === "timer" ||
+                                      isZonedTrigger(trigger)),
+                                )}
+                              >
+                                Release
+                              </option>
+                            )}
+                          </select>
+                        </label>
+                        <div className="row">
+                          <ArrowRight size={14} className="muted" />
+                          <select
+                            aria-label={`Transition ${index + 1} target state`}
+                            value={transition.targetStateId}
+                            onChange={(e) =>
+                              updateState((next) => {
+                                next.transitions[index].targetStateId =
+                                  e.target.value;
+                                if (
+                                  project.states.some(
+                                    (target) =>
+                                      target.id === e.target.value &&
+                                      isChildState(target),
+                                  )
+                                )
+                                  delete next.transitions[index]
+                                    .alternateStateIds;
+                                else
+                                  next.transitions[index].alternateStateIds =
+                                    next.transitions[
+                                      index
+                                    ].alternateStateIds?.filter(
+                                      (id) => id !== e.target.value,
+                                    );
+                              })
+                            }
+                          >
+                            {project.states.map((target) => (
+                              <option key={target.id} value={target.id}>
+                                {isChildState(target)
+                                  ? `Run child: ${target.name} (parallel)`
+                                  : `Go to: ${target.name}`}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <label className="check">
+                          <input
+                            type="checkbox"
+                            aria-label={`Transition ${index + 1} cycle variants`}
+                            disabled={project.states.some(
+                              (target) =>
+                                target.id === transition.targetStateId &&
+                                isChildState(target),
+                            )}
+                            checked={!!transition.alternateStateIds}
+                            onChange={(event) =>
+                              updateState((next) => {
+                                if (event.target.checked)
+                                  next.transitions[index].alternateStateIds =
+                                    [];
+                                else
+                                  delete next.transitions[index]
+                                    .alternateStateIds;
+                              })
+                            }
+                          />
+                          Cycle through scene variants
+                        </label>
+                        {transition.alternateStateIds && (
+                          <div className="transition-targets">
+                            <span className="hint">
+                              Starts with the target above, then these states in
+                              the order selected. Arm / reset starts over.
+                            </span>
+                            {project.states
+                              .filter(
+                                (target) =>
+                                  target.id !== transition.targetStateId &&
+                                  !isChildState(target),
+                              )
+                              .map((target) => (
+                                <label className="check" key={target.id}>
+                                  <input
+                                    aria-label={`Transition ${index + 1} variant ${target.name}`}
+                                    type="checkbox"
+                                    checked={transition.alternateStateIds!.includes(
+                                      target.id,
+                                    )}
+                                    onChange={(event) =>
+                                      updateState((next) => {
+                                        const t = next.transitions[index];
+                                        t.alternateStateIds = event.target
+                                          .checked
+                                          ? [
+                                              ...(t.alternateStateIds ?? []),
+                                              target.id,
+                                            ]
+                                          : t.alternateStateIds?.filter(
+                                              (id) => id !== target.id,
+                                            );
+                                      })
+                                    }
+                                  />
+                                  {target.name}
+                                </label>
+                              ))}
+                            <span className="hint">
+                              Order:{" "}
+                              {[
+                                transition.targetStateId,
+                                ...transition.alternateStateIds,
+                              ]
+                                .map(
+                                  (id) =>
+                                    project.states.find(
+                                      (target) => target.id === id,
+                                    )?.name,
+                                )
+                                .join(" → ")}
+                            </span>
+                          </div>
+                        )}
+                        {project.triggers.some(
+                          (trigger) =>
+                            trigger.id === transition.triggerId &&
+                            isZonedTrigger(trigger),
+                        ) && (
+                          <p className="hint">
+                            Inactive while this sensor uses distance zones. Edit
+                            its actions in Hardware; switching back to a single
+                            threshold restores this transition.
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                    <button
+                      className="ghost"
+                      disabled={
+                        !project.triggers.some(
+                          (trigger) =>
+                            !isZonedTrigger(trigger) &&
+                            (!state.transitions.some(
                               (t) =>
                                 t.triggerId === trigger.id &&
-                                t.edge === "release",
-                            ))),
-                    )
-                  }
-                  onClick={() =>
-                    updateState((next) => {
-                      const available = project.triggers.find(
-                        (trigger) =>
-                          !isZonedTrigger(trigger) &&
-                          (!next.transitions.some(
-                            (t) =>
-                              t.triggerId === trigger.id &&
-                              (t.edge ?? "activate") === "activate",
-                          ) ||
-                            (trigger.kind !== "timer" &&
-                              !next.transitions.some(
+                                (t.edge ?? "activate") === "activate",
+                            ) ||
+                              (trigger.kind !== "timer" &&
+                                trigger.kind !== "manual" &&
+                                !state.transitions.some(
+                                  (t) =>
+                                    t.triggerId === trigger.id &&
+                                    t.edge === "release",
+                                ))),
+                        )
+                      }
+                      onClick={() =>
+                        updateState((next) => {
+                          const available = project.triggers.find(
+                            (trigger) =>
+                              !isZonedTrigger(trigger) &&
+                              (!next.transitions.some(
                                 (t) =>
                                   t.triggerId === trigger.id &&
-                                  t.edge === "release",
-                              ))),
-                      );
-                      if (available)
-                        next.transitions.push({
-                          triggerId: available.id,
-                          targetStateId: project.initialStateId,
-                          edge: next.transitions.some(
-                            (t) =>
-                              t.triggerId === available.id &&
-                              (t.edge ?? "activate") === "activate",
-                          )
-                            ? "release"
-                            : "activate",
-                        });
-                    })
-                  }
-                >
-                  <Plus size={13} />
-                  Add transition
-                </button>
-                <p className="hint">
-                  Unlisted triggers are ignored in this state. Transitions
-                  replace the current timeline. Distance zone actions run in
-                  every state and are configured in Hardware.
-                </p>
-              </div>
+                                  (t.edge ?? "activate") === "activate",
+                              ) ||
+                                (trigger.kind !== "timer" &&
+                                  trigger.kind !== "manual" &&
+                                  !next.transitions.some(
+                                    (t) =>
+                                      t.triggerId === trigger.id &&
+                                      t.edge === "release",
+                                  ))),
+                          );
+                          if (available)
+                            next.transitions.push({
+                              triggerId: available.id,
+                              targetStateId: project.initialStateId,
+                              edge: next.transitions.some(
+                                (t) =>
+                                  t.triggerId === available.id &&
+                                  (t.edge ?? "activate") === "activate",
+                              )
+                                ? "release"
+                                : "activate",
+                            });
+                        })
+                      }
+                    >
+                      <Plus size={13} />
+                      Add transition
+                    </button>
+                    <p className="hint">
+                      Unlisted triggers are ignored in this state. Go to
+                      replaces the main timeline; Run child starts a parallel
+                      sequence without changing the main timeline or audio.
+                      Distance zone actions run in every state and are
+                      configured in Hardware.
+                    </p>
+                  </div>
+                </>
+              )}
               <Issues
                 issues={compiled.issues.filter(
                   (issue) => issue.severity === "error",
@@ -1771,7 +2115,7 @@ export function App() {
                   }
                 >
                   <Trash2 size={13} />
-                  Delete state
+                  {child ? "Delete child sequence" : "Delete state"}
                 </button>
               )}
             </aside>
@@ -1836,9 +2180,13 @@ export function App() {
         <span className="row">
           <span className="connection-dot" />
           {BOARD_PROFILES[project.board].name} ·{" "}
-          {project.wiring === "relay-shield"
-            ? "Four-relay shield"
-            : "Custom wiring"}
+          {project.wiring === "fixed"
+            ? (project.wiringConfiguration?.name ?? "Fixed wiring")
+            : project.wiring === "standard-uno"
+              ? "Standard Uno harness"
+              : project.wiring === "relay-shield"
+                ? "Four-relay shield"
+                : "Custom wiring"}
         </span>
         <span>
           {allocation.availableOutputPins.length} free pins ·{" "}
