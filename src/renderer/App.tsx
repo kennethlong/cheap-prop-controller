@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { version as appVersion } from "../../package.json";
 import {
   ArrowRight,
   AudioLines,
@@ -2197,7 +2198,7 @@ export function App() {
           )}{" "}
           events · 50 ms resolution
         </span>
-        <span>MVP · local projects</span>
+        <span>v{appVersion} · local projects</span>
       </footer>
       {toast && (
         <div

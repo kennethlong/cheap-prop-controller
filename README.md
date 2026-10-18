@@ -1,10 +1,10 @@
 # Cheap Prop Controller
 
-A desktop scene editor and autonomous Arduino controller for relay-driven props, trigger sensors, and inexpensive MP3 modules. The MVP uses named states with their own output timelines and trigger transitions. It runs locally without an account or network service.
+A desktop scene editor and autonomous Arduino controller for relay-driven props, trigger sensors, and inexpensive MP3 modules. Version 1.0 uses named states with their own output timelines and trigger transitions. It runs locally without an account or network service.
 
 ## Run the application
 
-On this Windows machine, double-click **Start Controller.cmd**. It launches the packaged application when available, or the built Electron app otherwise. Windows builds are in `release/`, including the portable app and **Cheap Prop Controller Setup 0.11.0.exe** in `release/0.11.0/`. The installer defaults to your user account, lets you select an installation folder, and creates Desktop and Start Menu shortcuts.
+On this Windows machine, double-click **Start Controller.cmd**. It launches the packaged application when available, or the built Electron app otherwise. Windows builds are in `release/`, including the portable app and **Cheap Prop Controller Setup 1.0.0.exe** in `release/1.0.0/`. The installer defaults to your user account, lets you select an installation folder, and creates Desktop and Start Menu shortcuts. The desktop version is displayed in the status bar; firmware keeps its independent version number (currently 0.7.2).
 
 The starter project has eight outputs, three button triggers, and Idle → Approach → Scare → Idle transitions. It contains no audio files and uses 172 bytes of scene storage. Opening the serial connection resets an Uno, which starts its saved initial state again.
 
@@ -24,7 +24,7 @@ The device console exposes physical trigger injection and status. A physical tri
 
 Installed copies keep projects in `Documents/Cheap Prop Controller/Projects` by default, outside the installation folder that is replaced or removed during upgrades/uninstall. Uninstall keeps the app's preferences and external scene folders. Avoid saving projects in the installed program directory. For custom launchers, set the absolute `CPC_PROJECTS_DIRECTORY` environment variable to choose a default project library. A remembered project folder still takes precedence.
 
-Six editable projects are in `examples/`: the eight-output starter, an Uno scene with single-player fade transitions, a Mega scene with PIR, HC-SR04, reset button, and three audio players, an Uno scene with four ultrasonic distance zones, an IR learning starter with an empty command library, and a two-player Uno example with the new scene controls. The audio examples have numbered track slots without included MP3s; use each track's **Replace / link file** action in Media to attach your files while preserving state assignments.
+Seven editable projects are in `examples/`: the eight-output starter, an Uno scene with single-player fade transitions, a Mega scene with PIR, HC-SR04, reset button, and three audio players, an Uno scene with four ultrasonic distance zones, an IR learning starter with an empty command library, a two-player Uno example with the scene controls, and a manual-trigger Uno bench. The audio examples have numbered track slots without included MP3s; use each track's **Replace / link file** action in Media to attach your files while preserving state assignments.
 
 ## Scene controls and live recording
 
@@ -198,7 +198,7 @@ The linked [DIYhz GX12-4 listing](https://www.amazon.com/dp/B089YTG1SX) describe
 | Pro Mini / ATmega328P, 5 V, 16 MHz | 1,024 bytes | Timer2 software UART |
 | Mega 2560 | 4,096 bytes | Three hardware UARTs |
 
-This MVP supports up to 32 outputs, eight triggers, eight states, and three players, subject to the board's actual pins and storage. These are software limits, not claims about the total GPIO on a Mega. Audio module combinations still require physical qualification. Uno R4, Nano Every, Pro Micro, ATmega168, and 3.3 V/8 MHz Pro Mini are not these profiles.
+The application supports up to 32 outputs, eight triggers, eight states, and three players, subject to the board's actual pins and storage. These are software limits, not claims about the total GPIO on a Mega. Audio module combinations still require physical qualification. Uno R4, Nano Every, Pro Micro, ATmega168, and 3.3 V/8 MHz Pro Mini are not these profiles.
 
 D0/D1 are reserved for the host. The OctoBanger shield preset reserves D7, D6, D5, D4 for its first four outputs; check that a particular shield matches. Audio players reserve two pins each, plus an input when BUSY feedback is enabled. Digital triggers use one pin; an HC-SR04 uses two; timers and app/manual triggers use none. Nano/Pro Mini A6/A7 can sample BUSY but are not interchangeable digital GPIO. Timer2 is reserved on Uno-family boards, so Timer2 PWM/tone are unavailable; D3/D11 still work as ordinary digital outputs.
 
@@ -222,7 +222,7 @@ DFPlayer Mini and YX5300/Catalex have separate packet encoders. This version sen
 
 Existing projects keep their original audio transitions. Fade out / fade in requires firmware 0.2.0 or newer; use **Firmware → Install firmware** before uploading it. The app checks support before changing the controller's saved scene.
 
-Multiple players need separate mixer inputs or a suitable summing circuit before amplification. Do not join amplified speaker outputs. The displayed MCU TX pin connects to a module's RX; observe the module's signal-level requirements. RX pins are reserved for future feedback but the MVP does not decode module responses.
+Multiple players need separate mixer inputs or a suitable summing circuit before amplification. Do not join amplified speaker outputs. The displayed MCU TX pin connects to a module's RX; observe the module's signal-level requirements. RX pins are reserved for future feedback but the firmware does not decode module responses.
 
 ## First physical bench session
 
