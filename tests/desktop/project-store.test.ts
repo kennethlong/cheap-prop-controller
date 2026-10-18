@@ -1,4 +1,4 @@
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, vi } from "vitest";
 import {
   mkdtemp,
   writeFile,
@@ -15,8 +15,17 @@ import { ProjectStore } from "../../src/main/project-store";
 import { createDefaultProject } from "../../src/shared/index";
 import { probeAudioDurationMs } from "../../src/main/audio-export";
 import ffmpegPath from "ffmpeg-static";
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, mkdir: vi.fn(actual.mkdir) };
+});
 const temporary: string[] = [];
 afterEach(async () => {
+  const actual =
+    await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+  vi.mocked(mkdir).mockImplementation(actual.mkdir);
   for (const folder of temporary.splice(0)) {
     const resolved = path.resolve(folder);
     if (
@@ -53,7 +62,127 @@ async function mp3(filename: string) {
     { windowsHide: true, timeout: 20_000 },
   );
 }
+async function rejectMkdirAt(directory: string) {
+  const actual =
+    await vi.importActual<typeof import("node:fs/promises")>(
+      "node:fs/promises",
+    );
+  vi.mocked(mkdir).mockImplementation((target, options) => {
+    if (typeof target === "string" && path.resolve(target) === directory)
+      return Promise.reject(
+        Object.assign(
+          new Error(`EPERM: operation not permitted, mkdir '${target}'`),
+          {
+            code: "EPERM",
+            syscall: "mkdir",
+            path: target,
+          },
+        ),
+      );
+    return actual.mkdir(target, options);
+  });
+}
 describe("project file and media persistence", () => {
+  it.each(["card export", "project save", "trimmed clip"] as const)(
+    "supports %s in an existing drive-root-like destination",
+    async (operation) => {
+      const root = await folder();
+      const source = path.join(root, "original.mp3");
+      if (operation === "trimmed clip") await mp3(source);
+      else await writeFile(source, "ID3fixture");
+      const original = await readFile(source);
+      const destination = path.join(root, "drive-root");
+      await mkdir(destination);
+      // Windows rejects mkdir on an existing drive root even with recursive:
+      // true. Keep every other filesystem operation real and inside temp files.
+      await rejectMkdirAt(destination);
+      const store = new ProjectStore({ ffmpegPath: ffmpegPath! });
+      store.grantAudio(source);
+      const project = createDefaultProject();
+      project.audio.tracks = [{ number: 3, name: "Scare", path: source }];
+      if (operation === "card export") {
+        expect(await store.exportMedia(project, destination)).toEqual({
+          directory: destination,
+          files: 1,
+        });
+        expect(await readFile(path.join(destination, "01", "003.mp3"))).toEqual(
+          original,
+        );
+        expect(await readdir(destination)).toEqual(["01"]);
+      } else if (operation === "project save") {
+        const saved = await store.save(
+          project,
+          path.join(destination, "show.cpc.json"),
+        );
+        expect(
+          await readFile(
+            path.join(destination, saved.project.audio.tracks[0].path!),
+          ),
+        ).toEqual(original);
+        const reopened = await new ProjectStore().open(saved.path);
+        expect(reopened.project.audio.tracks).toEqual(
+          saved.project.audio.tracks,
+        );
+        expect((await readdir(destination)).sort()).toEqual([
+          "show.cpc.json",
+          "sounds",
+        ]);
+      } else {
+        const clip = path.join(destination, "clip.mp3");
+        expect(
+          await store.saveTrimmedAudio(
+            { ...project.audio.tracks[0], trimStartMs: 250, trimEndMs: 1250 },
+            clip,
+          ),
+        ).toEqual({ path: clip });
+        expect(await probeAudioDurationMs(ffmpegPath!, clip)).toBeCloseTo(
+          1000,
+          0,
+        );
+        expect(await readdir(destination)).toEqual(["clip.mp3"]);
+      }
+      expect(await readFile(source)).toEqual(original);
+    },
+    30_000,
+  );
+  it("preserves genuine directory-creation permission errors during export", async () => {
+    const root = await folder();
+    const source = path.join(root, "original.mp3");
+    await writeFile(source, "original audio");
+    const destination = path.join(root, "unwritable-new-folder");
+    await rejectMkdirAt(destination);
+    const store = new ProjectStore();
+    store.grantAudio(source);
+    const project = createDefaultProject();
+    project.audio.tracks = [{ number: 1, name: "Scare", path: source }];
+    await expect(store.exportMedia(project, destination)).rejects.toMatchObject(
+      {
+        code: "EPERM",
+        syscall: "mkdir",
+        path: destination,
+      },
+    );
+    expect(await readdir(root)).toEqual(["original.mp3"]);
+    expect(await readFile(source, "utf8")).toBe("original audio");
+  });
+  it("rejects a file selected as the export directory without changing it", async () => {
+    const root = await folder();
+    const source = path.join(root, "original.mp3");
+    const destination = path.join(root, "not-a-directory");
+    await writeFile(source, "original audio");
+    await writeFile(destination, "keep this file");
+    const store = new ProjectStore();
+    store.grantAudio(source);
+    const project = createDefaultProject();
+    project.audio.tracks = [{ number: 1, name: "Scare", path: source }];
+    await expect(store.exportMedia(project, destination)).rejects.toThrow();
+    expect(await readFile(destination, "utf8")).toBe("keep this file");
+    expect(await readFile(source, "utf8")).toBe("original audio");
+    expect((await readdir(root)).sort()).toEqual([
+      "not-a-directory",
+      "original.mp3",
+    ]);
+  });
   it("saves portable audio assets, opens them, and exports numbered card files", async () => {
     const root = await folder();
     const source = path.join(root, "original.mp3");

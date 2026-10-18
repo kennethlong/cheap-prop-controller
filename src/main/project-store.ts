@@ -92,7 +92,7 @@ export class ProjectStore {
         trims.push({ track, original: asset });
       }
     }
-    await mkdir(directory, { recursive: true });
+    await ensureDirectory(directory);
     const staging = await mkdtemp(path.join(directory, ".cpc-project-save-"));
     try {
       for (let index = 0; index < trims.length; index++) {
@@ -199,7 +199,7 @@ export class ProjectStore {
       }
     }
     const directory = path.dirname(destination);
-    await mkdir(directory, { recursive: true });
+    await ensureDirectory(directory);
     const staging = await mkdtemp(path.join(directory, ".cpc-audio-save-"));
     let projectCopyPath: string | undefined;
     try {
@@ -333,7 +333,7 @@ export class ProjectStore {
           );
       }
     }
-    await mkdir(directory, { recursive: true });
+    await ensureDirectory(directory);
     const staging = await mkdtemp(path.join(directory, ".cpc-export-"));
     try {
       // Encode/copy the entire set before replacing even one existing card track.
@@ -398,6 +398,20 @@ async function installAudioAsset(asset: AudioAsset) {
         "A saved audio asset was modified outside the application. Choose Save As to preserve both versions.",
       );
   }
+}
+async function ensureDirectory(directory: string) {
+  // Windows rejects mkdir on an existing drive root, even with recursive:true.
+  // Reuse existing directories, but preserve real permission and device errors.
+  let info;
+  try {
+    info = await stat(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    await mkdir(directory, { recursive: true });
+    return;
+  }
+  if (!info.isDirectory())
+    throw new Error("The destination is not a directory");
 }
 async function accessFile(filename: string) {
   const info = await stat(filename);
