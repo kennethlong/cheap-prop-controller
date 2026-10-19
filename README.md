@@ -1,15 +1,30 @@
 # Cheap Prop Controller
 
-A desktop scene editor and autonomous Arduino controller for relay-driven props, trigger sensors, and inexpensive MP3 modules. Version 1.0 uses named states with their own output timelines and trigger transitions. It runs locally without an account or network service.
+A desktop scene editor and autonomous Arduino controller for relay-driven props, trigger sensors, inexpensive MP3 modules, and learned IR remote commands. Named states such as Ambient, Approach, and Scare have their own timelines and trigger transitions. It runs locally without an account or network service; an uploaded scene runs on the controller without the computer.
+
+Current versions: **desktop 1.0.1 · firmware 0.7.3**. Use the bundled firmware for the selected board. Windows portable and installer builds are available locally; macOS/Linux packaging is configured but has not been qualified on hardware. ESP32 support remains planned.
+
+## Features at a glance
+
+- **Scene editing:** 50 ms / 20 FPS output intervals, ON/OFF events, short pulse durations, desktop preview, undo/redo, and live performance recording into a timeline.
+- **Independent prop actions:** parallel output-only child sequences with cooldowns, so an ankle-blaster pulse can run while the main approach audio and timeline continue.
+- **Triggers:** buttons/foot pads, dry-contact IR beams, PIR motion, HC-SR04 ultrasonic thresholds or multiple distance zones, periodic timers, and app/manual triggers. Transitions can use activation or release; alternate destination states cycle in round-robin order.
+- **Audio:** DFPlayer Mini and YX5300/Catalex, up to three players, MP3 trimming and export, configurable fades/crossfades, looping ambient audio with a separate mixed volume, and optional BUSY feedback.
+- **IR remotes:** capture and name buttons, test them, place named commands on a timeline or in distance-zone actions, and combine timed button presses into reusable macros.
+- **Hardware layouts:** Uno, classic Nano, 5 V/16 MHz Pro Mini, and Mega; relay-shield and standard harness presets; ten built-in wiring configurations plus custom configurations with import/export.
+- **Bench controls:** individual output tests, manual trigger injection, immediate Arm/reset, delayed arming with a 15-second exit window, and priority STOP.
+- **Local projects:** JSON scenes with adjacent `sounds` folders, direct MP3-card export, onboard scene storage with capacity checks, and a Windows installer.
+
+See [scene controls](#scene-controls-and-live-recording), [parallel children](#parallel-child-sequences), [IR learning](#learn-and-replay-ir-remote-buttons), [standard wiring](#standard-uno-harness), [reusable configurations](#reusable-wiring-configurations), and [audio behavior](#audio-behavior) for setup details.
 
 ## Run the application
 
-On this Windows machine, double-click **Start Controller.cmd**. It launches the packaged application when available, or the built Electron app otherwise. Windows builds are in `release/`, including the portable app and **Cheap Prop Controller Setup 1.0.0.exe** in `release/1.0.0/`. The installer defaults to your user account, lets you select an installation folder, and creates Desktop and Start Menu shortcuts. The desktop version is displayed in the status bar; firmware keeps its independent version number (currently 0.7.2).
+From a built Windows checkout, double-click **Start Controller.cmd**. It launches the packaged application when available, or the built Electron app otherwise. The current local builds are **Cheap Prop Controller 1.0.1.exe**, **Cheap Prop Controller Setup 1.0.1.exe**, and `win-unpacked/Cheap Prop Controller.exe` under `release/1.0.1/`. Generated binaries are not committed to Git; a fresh clone needs the [development/build steps](#development) below. The installer defaults to your user account, lets you select an installation folder, and creates Desktop and Start Menu shortcuts. The desktop version is displayed in the status bar; firmware has its own version number.
 
 The starter project has eight outputs, three button triggers, and Idle → Approach → Scare → Idle transitions. It contains no audio files and uses 172 bytes of scene storage. Opening the serial connection resets an Uno, which starts its saved initial state again.
 
-1. Open **Hardware** and choose the board, wiring preset, triggers, and outputs. The displayed pins are the wiring map for that configuration.
-2. Open **Media**, add MP3s, and choose ambient playback and fade settings. Assign foreground tracks in each state's settings. Player count and pin assignments update automatically.
+1. Open **Hardware** and choose the board and wiring preset, or review and apply a reusable wiring configuration. Enable the installed triggers and outputs. The displayed pins are the wiring map for that configuration.
+2. Open **Media**, add MP3s, and choose ambient playback and fade settings. Assign foreground tracks in each state's settings. Custom and relay-shield presets allocate players and pins automatically. Fixed configurations keep their installed players and pin assignments; add and assign any extra player explicitly. The standard Uno harness uses one player. Resolve hardware/capacity errors before uploading.
 3. Select a state. Drag across an output lane to create an event. Select it to edit start/end times or delete it. **Duration (milliseconds)** offers 100–500 ms in 50 ms steps, keeping the start time fixed. Choices that overlap another event on the same output or extend past the timeline are disabled; use Start/End for other lengths. Events snap to 50 ms and cannot overlap on the same output.
 4. Use **Play preview**, then the Approach, Scare, and Reset preview buttons. These controls affect the computer simulation only.
 5. Save the project in its own folder. Its JSON and adjacent `sounds` folder belong together when moving it to another computer. Saving copies full original MP3s and renders applied trims into `sounds`; filenames avoid collisions. **Save As** copies the scene's originals and regenerates its applied clips at the new location. Older `.assets` projects migrate by copying on their next save; their old audio is retained.
@@ -18,13 +33,25 @@ The starter project has eight outputs, three button triggers, and Idle → Appro
 
 **Reset & arm in 15 s** gives you time to leave the sensors' view. It stops the physical controller and its audio, waits for STOP acknowledgement, then counts down 15 seconds before resetting into the initial state and arming. Keep the app open and USB connected until the countdown finishes. **Cancel arming** or **STOP** cancels it; changing the project/workspace or losing the connection also cancels. The existing **Arm / reset** button is immediate. This feature uses existing firmware commands and does not require a firmware update. A sensor still active when the countdown ends must release before its next activation can trigger the scene.
 
-The device console exposes physical trigger injection and status. A physical trigger is an input to the currently uploaded project; preview and edited-but-not-uploaded settings do not change the controller.
+The device console exposes physical trigger injection and status. **Send trigger** injects the selected input into the currently uploaded scene; the active state's mappings determine whether it changes state, starts a child, or has no effect. **Upload scene** on the current connection enables this control after edits or reconnecting. Preview and edited-but-not-uploaded settings do not change the controller.
 
 **Open** starts in the current scene's folder, or the last successfully opened/saved project folder after restarting. Importing or exporting audio does not change this location. New scene saves use the same folder policy. On first use, **Start Controller.cmd** and development builds use `projects/` under this repository; the standalone portable EXE uses `projects/` beside itself. Other packaged builds, or a read-only portable location, use `Documents/Cheap Prop Controller/Projects`. The app creates the dedicated folder when needed. An old remembered Documents-root default switches to the new location; opening an existing scene there still works. Existing files are not moved; use **Save As** to relocate a scene and its sounds.
 
 Installed copies keep projects in `Documents/Cheap Prop Controller/Projects` by default, outside the installation folder that is replaced or removed during upgrades/uninstall. Uninstall keeps the app's preferences and external scene folders. Avoid saving projects in the installed program directory. For custom launchers, set the absolute `CPC_PROJECTS_DIRECTORY` environment variable to choose a default project library. A remembered project folder still takes precedence.
 
-Seven editable projects are in `examples/`: the eight-output starter, an Uno scene with single-player fade transitions, a Mega scene with PIR, HC-SR04, reset button, and three audio players, an Uno scene with four ultrasonic distance zones, an IR learning starter with an empty command library, a two-player Uno example with the scene controls, and a manual-trigger Uno bench. The audio examples have numbered track slots without included MP3s; use each track's **Replace / link file** action in Media to attach your files while preserving state assignments.
+Seven editable projects are included in [`examples/`](examples/):
+
+| Example | Demonstrates |
+|---|---|
+| [Three-state starter](examples/three-state-starter.cpc.json) | Eight outputs; Idle → Approach → Scare → Idle |
+| [Single-player fades](examples/single-player-fades-uno.cpc.json) | Uno with configurable fade-out/fade-in audio |
+| [Ambient and crossfades](examples/ambient-crossfades-mega.cpc.json) | Mega with three players, PIR, HC-SR04 and reset button |
+| [Ultrasonic zones](examples/ultrasonic-zones-uno.cpc.json) | Four distance ranges with ordered actions |
+| [IR learning starter](examples/ir-learning-starter.cpc.json) | Enabled IR with an empty command library |
+| [Scene controls](examples/scene-controls-uno.cpc.json) | Two-player Uno scene using the extended controls |
+| [Three-player manual bench](examples/manual-bench-uno.cpc.json) | Relay/audio test advanced from the app; legacy button input reserved on D12 |
+
+The audio examples have numbered track slots without included MP3s; use each track's **Replace / link file** action in Media to attach your files while preserving state assignments. Personal scenes under `projects/` and generated files under `artifacts/` are local files, not included with a fresh clone.
 
 ## Scene controls and live recording
 
@@ -37,7 +64,11 @@ These controls use the existing Hardware and Scene pages. Ambient audio still lo
 - State transitions can respond to **activation or release**. Release is available for buttons, PIR, and single-threshold ultrasonic inputs; distance zones retain their separate exit actions. An input held at startup must first become inactive and then activate before its release can fire. No echo preserves the previous ultrasonic threshold state.
 - **Cycle through scene variants** adds alternate destinations to a transition. They play in the displayed order, returning to the first after the last. Each state/trigger/edge has its own position, which Arm/reset clears. It is round robin, not random selection.
 
-The new controls require firmware **0.6.0**. Projects that use them compile as CPC2; upload checks `sceneControls:true` before writing. Projects without them retain their earlier bytes. Each alternate destination adds two bytes, each interval six bytes, and each timer eight bytes. ON/OFF, release, audio-end, and BUSY settings use existing record fields. The displayed capacity includes the whole scene.
+These controls require firmware **0.6.0 or newer** and are included in the current bundle. Projects that use them compile as CPC2; upload checks `sceneControls:true` before writing. Projects without them retain their earlier bytes. Each alternate destination adds two bytes, each interval six bytes, and each timer eight bytes. ON/OFF, release, audio-end, and BUSY settings use existing record fields. The displayed capacity includes the whole scene.
+
+To vary the audio on successive visits, create states such as **Approach A**, **Approach B**, and **Approach C**, assign a different foreground track to each, and add them to the entry trigger's **Cycle through scene variants** list. The same pattern works for Scare or other main states, with each variant able to have its own events and transitions. Each variant uses one of the eight shared main-state/child slots. This is round-robin state selection; random track selection and a track pool within one state are not implemented. Arm/reset restarts the order, so return to Ambient through an ordinary transition to keep cycling across visitors.
+
+Trigger mappings belong to the current main state. An unmapped trigger has no effect there, and a physical activation must release before another activation can fire. For a missed-PIR fallback, map the ultrasonic threshold or beam to Scare from both Idle and Approach. For an independent ankle-blaster pulse, map its beam to a parallel child instead. Reaching a main timeline's end does not automatically change state: timeline looping, audio looping, trigger transitions, and an optional audio-finished destination are separate settings.
 
 ## Parallel child sequences
 
@@ -51,7 +82,7 @@ Parallel children require firmware **0.7.0** (`parallelChildren:true`). Uploads 
 
 For independent controls without another button or wire, add a trigger in Hardware and choose **App / manual · no pin**. Name it **Next audio state**, then map it between your main states. Map the beam input to the child in each main state where it should fire. On the physical controller, select **Next audio state** and click **Send trigger** to advance; select the beam to test the child. Desktop preview has separate buttons for the same triggers. Manual triggers have no release action or automatic activation, consume no pins, and use one of the eight trigger slots and eight scene bytes.
 
-App/manual triggers require firmware **0.7.1** (`manualTriggers:true`); the app checks support before uploading. The parallel beam bench uses a manual Ambient → Approach → Scare → Ambient cycle and a separate beam child, preserving D8 beam, D9 SSR, D2/D3 DFPlayer and D7/D6/D5/D4 shield wiring.
+App/manual triggers require firmware **0.7.1 or newer** (`manualTriggers:true`); the app checks support before uploading. On the current standard harness, the beam uses D10, the solenoid SSR uses A3, and **Next audio state** needs no physical pin. The older three-player example has a different mapping; always use the current project's Hardware map.
 
 ## Optional MP3 playback feedback
 
@@ -77,19 +108,21 @@ Distance zones require firmware **0.4.0** with the `distanceZones` capability. U
 
 The **Hardware → IR remote commands** library gives captured buttons names such as “Candles on,” “Dim one step,” and “Candles off.” Names and captured signals are saved in the project. A name refers to the same command when used in timeline cues and distance-zone actions; renaming preserves those references.
 
-1. Enable IR remote control, check the updated pin assignments, and upload the scene. An empty library is valid; `examples/ir-learning-starter.cpc.json` provides that starting point. Install firmware **0.5.0** first. Learning/testing requires an uploaded IR-enabled scene so it cannot silently repurpose a pin assigned to another device.
+1. Install firmware **0.7.3**, enable IR remote control, check the pin assignments, and upload the scene. An empty library is valid; `examples/ir-learning-starter.cpc.json` provides that starting point. Learning/testing requires an uploaded IR-enabled scene so it cannot silently repurpose a pin assigned to another device.
 2. Connect the receiver/transmitter and choose **Learn IR command**. Learning stops the physical scene and waits up to ten seconds for one complete button press. Point the original remote at the receiver, then press and release the button. Cancel or STOP leaves the controller stopped.
 3. Give the capture a name. Use **Test captured command**, observe the target device, then save it to the library. A serial acknowledgement means the test was accepted; the controller cannot confirm whether the candle responded. Save the project to retain the library.
 4. Add a named IR cue at a time on a state's IR lane, or select **Send IR command** in a distance zone's entry/exit actions. Upload the scene again to use the saved commands autonomously. Desktop preview logs requested commands without transmitting them or simulating the physical send queue; queueing and state changes can delay or cancel transmission.
 
 The [Adafruit 5990 transceiver](https://learn.adafruit.com/adafruit-infrared-ir-remote-transceiver/pinouts) has separate receiver **IRin** and transmitter **IRout** signals. For the supported 5 V boards, connect VIN to a suitable 5 V supply and GND to common ground. Its emitter can draw about 400 mA while pulsing. The receiver targets 38 kHz remote signals; it does not measure the carrier frequency. Our pin assignments are:
 
-| Board | Module IRin → Arduino receiver | Module IRout → Arduino transmitter |
+| Board | Module IRin → Arduino receiver | Arduino transmitter → module IRout |
 |---|---|---|
 | Uno, classic Nano, 5 V/16 MHz Pro Mini | D2 | D9 |
 | Mega 2560 | D2 | D11 |
 
-Both pins are reserved before allocating audio, triggers, and prop outputs. IR uses Timer1; its PWM/servo functions are unavailable while IR is enabled. The firmware retains Timer2 for the Uno-family MP3 UART and Timer0 for timekeeping. It sends IR with a hardware carrier and nonblocking envelope scheduling, rather than calling a blocking library sender. Actual optical range and coexistence with connected sensors/audio still require bench verification.
+Both pins are reserved before allocating audio, triggers, and prop outputs. IR uses Timer1; its PWM/servo functions are unavailable while IR is enabled. The firmware retains Timer2 for the Uno-family MP3 UART and Timer0 for timekeeping. It sends IR with a hardware carrier and nonblocking envelope scheduling. Capture, naming, and individual On/Off playback have been confirmed with the Adafruit transceiver and the 2-inch votive candle on the standard Uno bench. Test other remotes, placement/range, and simultaneous scene activity on the intended hardware.
+
+Firmware **0.7.3** fixes a timer conflict between IR transmission and ordinary GPIO access, including the standard Uno beam input. Older firmware could accept the first IR test and then report **Controller did not respond to HELLO** on later tests. **STOP** restores communication; install the current firmware before repeating the test. The fix preserves pin assignments and learned commands. A 500 ms per-frame watchdog also cancels stalled IR work and reports an error, keeping communication available.
 
 The app recognizes NEC-style 32-bit frames and stores them compactly. Other supported captures retain a raw pattern of 5–127 alternating pulses, quantized to 50 μs, at most 200 ms per frame. Raw playback assumes 38 kHz and must be tested with the target. Long, unusual, different-carrier, rolling-code, or toggle-bit protocols are not guaranteed. Learning a “Dim” button reproduces that button; it does not discover absolute brightness percentages.
 
@@ -117,42 +150,42 @@ Each project supports 32 macros with up to 32 steps each. The capacity meter inc
 
 Changing the main state or stopping cancels remaining macro steps. An Off step in Approach will not run if a trigger enters Scare first; add the appropriate Off command at the destination state's start when needed. Macros are available on main-state timelines; parallel children remain output-only, and distance-zone actions currently select individual named commands.
 
-### Standard Uno harness and Adafruit IR bench (October 14, 2026)
+## Standard Uno harness
 
 Select **Hardware -> Wiring preset -> Standard Uno harness** to use fixed assignments on Uno R3, classic Nano, or 5 V / 16 MHz Pro Mini. Each hardware slot keeps its pins when disabled, absent, renamed, or reordered. Missing optional slots are displayed as reserved. Check a slot's **Enable** control only when its device is installed. Disabled devices retain their settings and sequence edits but are omitted from the uploaded scene and desktop preview; disabled sensors are not sampled or pinged. Disabling the IR transceiver also retains its learned library and cues without transmitting them. Ordinary custom/shield presets still allocate pins dynamically.
 
 The standard supports one DFPlayer and cut or fade-out/fade-in transitions. Continuous ambient plus foreground mixing and multi-player crossfades need another profile. D0/D1 remain reserved for USB serial. A5 can be a seventh output or DFPlayer BUSY feedback, but not both. The standard slots are defined in `src/shared/standard-harness.ts`.
 
-| Connection | Original PIR/ultrasonic bench | Fixed standard pin |
-|---|---|---|
-| DFPlayer RX, through existing 1 kOhm resistor | D2 | D3 |
-| DFPlayer TX, if connected (otherwise leave unwired) | D3 | D8 |
-| Beam contact signal | D8 | D10 |
-| PIR OUT | D9 | D11 |
-| HC-SR04 TRIG | D10 | D12 |
-| HC-SR04 ECHO | D11 | D13 |
-| Solenoid SSR control | D12 | A3 (D17) |
-| Strobe SSR control | D13 | A4 (D18) |
-| Shield relays 1, 2, 3, 4 | D7, D6, D5, D4 | Unchanged |
-| Adafruit IRin (white STEMMA wire) | Not installed | D2 |
-| Adafruit IRout (green STEMMA wire) | Not installed | D9 |
-| Optional backup PIR OUT | Not installed | A0 (D14) |
-| Optional backup HC-SR04 TRIG / ECHO | Not installed | A1 / A2 (D15 / D16) |
-| Spare output or optional DFPlayer BUSY | Not installed | A5 (D19) |
+| Connection | Fixed Uno-family pin |
+|---|---|
+| DFPlayer RX, through 1 kΩ resistor | D3 → module RX |
+| DFPlayer TX, if connected (otherwise leave unwired) | D8 ← module TX |
+| Beam contact signal | D10; contact closes to GND |
+| PIR OUT | D11 |
+| HC-SR04 TRIG | D12 |
+| HC-SR04 ECHO | D13 |
+| Solenoid SSR control | A3 (D17) |
+| Strobe SSR control | A4 (D18) |
+| Shield relays 1, 2, 3, 4 | D7, D6, D5, D4 |
+| Adafruit IRin (white STEMMA wire) | D2 ← module IRin |
+| Adafruit IRout (green STEMMA wire) | D9 → module IRout |
+| Optional backup PIR OUT | A0 (D14) |
+| Optional backup HC-SR04 TRIG / ECHO | A1 / A2 (D15 / D16) |
+| Spare output or optional DFPlayer BUSY | A5 (D19) |
 
-`projects/avr-bench/Standard Uno bench.cpc.json` is the prepared hardware-test scene. It preserves the original scene states, events, media, and IDs, enables the new IR transceiver, and leaves backup sensors and the A5 spare disabled. It compiles to 272 of 1,024 Uno scene bytes before learning commands. The original bench file is unchanged. Use this project instead of the earlier autoallocated `Adafruit IR bench.cpc.json`, whose SSRs were temporarily assigned A0/A1.
+For a new standard-wired controller, create/open a scene, select this preset or the board's standard wiring configuration, and enable the installed devices. For IR-only learning, the tracked [IR learning starter](examples/ir-learning-starter.cpc.json) is also available; check its Hardware map before connecting devices. The project's capacity display reflects the actual enabled devices, commands and events.
 
 When converting another project, existing outputs are assigned in order to shield relays 1-4, DC SSR, AC SSR, then spare. The first/second PIR and ultrasonic become primary/backup; the one button/contact becomes the beam slot. Manual and timer triggers use no slot. Conversion preserves IDs and edits and rejects extra or incompatible devices rather than dropping them. Review the wiring map before deployment. Adding manual/timer triggers still uses the eight-trigger software budget. Removing a device from the upload changes runtime channel indices, so physical trigger sending requires an upload of the current scene on the current connection; editing device settings or reconnecting requires reconfirming by upload. Output testing additionally verifies the uploaded scene checksum.
 
 Adafruit VIN (red) connects to the regulated external 5 V supply; GND (black) connects to its ground and Arduino ground. The board has its own LED driver and draws about 400 mA during transmit pulses at 5 V. Do not supply VIN from a GPIO or join the external 5 V rail to the USB-powered Uno 5 V rail. Follow the board labels when using another cable; the colors here are for Adafruit's cable. See [Adafruit's pinout](https://learn.adafruit.com/adafruit-infrared-ir-remote-transceiver/pinouts).
 
-Before changing this wiring, turn off the strobe's AC supply and solenoid's 12 V supply, then disconnect USB and peripheral 5 V power. Disconnect the signal leads whose assignments change. With those leads and the new transceiver disconnected, power only the Uno through USB and upload the standard bench scene; this prevents the old saved scene from driving the new wiring. Disconnect USB again, complete the new wiring, then reconnect controller/peripheral power with prop load power still off for the first IR test.
+Before changing this wiring, turn off the strobe's AC supply and solenoid's 12 V supply, then disconnect USB and peripheral 5 V power. Disconnect the signal leads whose assignments change. With those leads and the transceiver disconnected, power only the Uno through USB and upload the scene with the intended configuration; this prevents the old saved scene from driving the new wiring. Disconnect USB again, complete the new wiring, then reconnect controller/peripheral power with prop load power still off for the first test.
 
-In application 0.10.0, open the standard bench and use **Hardware -> IR remote commands -> Learn IR command**. Point the remote at the receiver, press one button, name the capture (for example, Candles on), test it, and save it. Learning/test stops the scene. Save the project after learning; upload it again when ready to use commands or macros in sequences. Existing firmware 0.7.2 supports the standard harness and IR workflow; a new flash is not required for this feature.
+Use the [IR learning workflow](#learn-and-replay-ir-remote-buttons) above with firmware 0.7.3. Save the project after learning; upload it again when ready to use the commands or macros in autonomous sequences. Testing a learned command leaves the physical scene stopped.
 
-### Reusable wiring configurations (application 0.11.0)
+## Reusable wiring configurations
 
-Open **Hardware → Wiring configurations**, select a built-in or saved layout, review the current/proposed connections, and click **Apply configuration**. Selection alone changes nothing. Applying changes this project's hardware assignments; save the project and upload its scene separately when the physical wiring is ready. Changing between Uno and Mega also requires the matching board firmware; choosing another wiring layout on the same board does not require different firmware.
+Open **Hardware → Wiring configurations**, select one of the ten built-in layouts or a saved layout, review the current/proposed connections, and click **Apply configuration**. Selection alone changes nothing. Applying changes this project's hardware assignments; save the project and upload its scene separately when the physical wiring is ready. Changing between Uno and Mega also requires the matching board firmware; choosing another wiring layout on the same board does not require different firmware.
 
 | Built-in configuration | Hardware layout |
 |---|---|
@@ -173,7 +206,7 @@ For the dual-beam box, add one **GX12-2 mating pair**: two beam connectors and s
 
 The agreed standard enclosure configuration is an Uno-family controller with one DFPlayer, four shield relay outputs, optional SSR outputs for a 12 V DC solenoid and a 110/120 V AC strobe, an optional Adafruit IR transceiver, a beam contact input, and primary/backup positions for both PIR and HC-SR04 sensors. Reserving all of these uses 17 of the 18 GPIO available after host serial, leaving one spare; MP3 BUSY feedback is not included. The backup sensors and both SSRs are optional installations. One player uses cut or fade-out/fade-in transitions and cannot mix simultaneous ambient and foreground tracks.
 
-The **Standard Uno harness** preset and the new fixed wiring configurations implement reserved slots and exclude disabled devices from the uploaded scene. The custom and relay-shield presets still change assignments when hardware requirements change. Do not treat an unused transition as a disabled sensor; use its Enable control.
+The **Standard Uno harness** preset and fixed wiring configurations implement reserved slots and exclude disabled devices from the uploaded scene. The custom and relay-shield presets still change assignments when hardware requirements change. Do not treat an unused transition as a disabled sensor; use its Enable control.
 
 The planned plastic ammo-box enclosure places the AC SSR inside, with a switched grounded AC receptacle for the strobe. Its load connection is separate from all sensor/audio connectors. DC SSR placement and relay-load connector types remain to be selected. **GX12 connectors are selected for all external sensors and the Adafruit IR transceiver; stereo 3.5 mm mini jacks are reserved for audio.** The IR transceiver mounts outside the box, facing the devices it controls, and uses a five-pin GX12 connector with four wired contacts and one unused contact. Its 5 V, ground, D2 receive, and D9 transmit assignments are unchanged. The distinct five-pin connector prevents interchange with the four-pin ultrasonic cables. The primary and backup ultrasonics use four-pin GX12 connectors; RJ45/Cat5 is not selected. Contact numbering remains to be documented before assembly.
 
@@ -202,7 +235,7 @@ The application supports up to 32 outputs, eight triggers, eight states, and thr
 
 D0/D1 are reserved for the host. The OctoBanger shield preset reserves D7, D6, D5, D4 for its first four outputs; check that a particular shield matches. Audio players reserve two pins each, plus an input when BUSY feedback is enabled. Digital triggers use one pin; an HC-SR04 uses two; timers and app/manual triggers use none. Nano/Pro Mini A6/A7 can sample BUSY but are not interchangeable digital GPIO. Timer2 is reserved on Uno-family boards, so Timer2 PWM/tone are unavailable; D3/D11 still work as ordinary digital outputs.
 
-Scene size includes all states, events, transitions, and settings. It does not grow with empty time between events. The capacity indicator blocks uploads that will not fit. Uploads use one storage bank: an interrupted upload leaves an invalid, stopped scene and requires uploading again. It does not preserve the previous scene as a backup.
+Scene size includes all states, events, transitions, and settings. It does not grow with empty time between events. Each timeline supports up to **54 minutes 36.75 seconds** (65,535 × 50 ms); the practical capacity limit is the encoded scene's bytes, not the old OctoBanger five-minute limit. Main states, variants and children share eight slots. The capacity indicator blocks uploads that will not fit. Uploads use one storage bank: an interrupted upload leaves an invalid, stopped scene and requires uploading again. It does not preserve the previous scene as a backup.
 
 ## Audio behavior
 
@@ -226,7 +259,7 @@ Multiple players need separate mixer inputs or a suitable summing circuit before
 
 ## First physical bench session
 
-Start with USB disconnected while changing wiring. Use the Hardware tab's current mapping, because adding players or sensors can reallocate pins.
+Start with power disconnected while changing wiring. Use the Hardware tab's current mapping: custom and relay-shield layouts can reallocate pins as devices are added, while fixed configurations preserve assigned pins.
 
 For a bench with only the Uno, four-relay shield, and three YX5300/Catalex players, open `examples/manual-bench-uno.cpc.json`. No sensors or physical buttons are required. Its single **Next audio state** trigger reserves D12 with an internal pull-up; leave that pin unwired. The module control pins remain TX D2/D8/D10 and reserved RX D3/D9/D11, with relays on D7/D6/D5/D4. All three player types are YX5300; change individual types in Hardware if using DFPlayer modules. The template expects card tracks 001, 002, and 003; link those MP3s in Media for desktop preview or card export.
 
@@ -240,7 +273,7 @@ For individual relay testing, use **Test outputs → Enter output test → Hold 
 4. Test one DFPlayer, then one YX5300, using known numbered MP3s. Add a second player and check start latency and fades through a mixer. Repeat with persistent ambient and a third player, particularly on Mega.
 5. Record which board/module combinations work reliably before connecting actual prop loads.
 
-Earlier bench sessions have user-confirmed relay, DFPlayer/YX5300 audio, beam, PIR, ultrasonic, and SSR operation. Each changed wiring configuration still needs a physical retest. Automated host tests and desktop previews do not verify the installed transceiver's range, real remote compatibility, load wiring, or sensor placement.
+Bench sessions have user-confirmed relay, DFPlayer/YX5300 audio, beam, PIR, ultrasonic, and SSR operation. On the standard Uno harness, Adafruit IR capture, naming, and the saved **2 inch Votive On / Off** test buttons are confirmed working with desktop 1.0.1 and firmware 0.7.3. Ten alternating test sends completed with responsive HELLO/STATUS and inactive prop outputs, followed by the user's confirmation that both buttons work. Each changed wiring configuration still needs a physical retest. Automated host tests and desktop previews do not establish optical range, other remote compatibility, load wiring, or sensor placement.
 
 ## Development
 
