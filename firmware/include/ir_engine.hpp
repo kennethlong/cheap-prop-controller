@@ -8,9 +8,10 @@ class IrEngine {
   uint8_t queue[8] = {}, head = 0, queued = 0, state = 0;
   uint8_t pulses[127] = {}, length = 0, repeats = 0;
   uint16_t gap = 50;
-  uint32_t nextAt = 0, enteredAt = 0, lastTick = 0, learnAt = 0;
+  uint32_t nextAt = 0, enteredAt = 0, lastTick = 0, learnAt = 0, frameAt = 0;
   bool job = false, wasSending = false, overflow = false, gapPending = false;
   bool irEnabled = false;
+  bool timedOut = false;
   // 0 normal, 1 draining for learn, 2 receiving, 3 staging, 4 staged playback.
   uint8_t mode = 0, stagedExpected = 0, stagedReceived = 0;
   static bool due(uint32_t now, uint32_t at) { return static_cast<int32_t>(now - at) >= 0; }
@@ -35,6 +36,7 @@ class IrEngine {
   uint8_t captureLength() const { return irDriver::capture.count; }
   uint16_t captureMicros(uint8_t i) const { return pulses[i] * 50U; }
   bool takeOverflow() { const bool value = overflow; overflow = false; return value; }
+  bool takeTimeout() { const bool value = timedOut; timedOut = false; return value; }
   void begin(const SceneImage* source) {
     stop(); irDriver::end(); image = source; irEnabled = source && source->hasIr();
     if (enabled()) {
@@ -47,7 +49,7 @@ class IrEngine {
   void stop() {
     irDriver::cancel(); irDriver::stopReceiver();
     head = queued = repeats = mode = stagedExpected = stagedReceived = 0;
-    job = wasSending = overflow = gapPending = false;
+    job = wasSending = overflow = gapPending = timedOut = false;
   }
   bool enqueue(uint8_t command) {
     if (!enabled() || mode || command >= image->irCommandCount()) return false;
@@ -124,7 +126,13 @@ class IrEngine {
   }
   void update(uint32_t now, bool transportIdle, bool sonarIdle) {
     if (!enabled() || mode == 1 || mode == 2 || mode == 3) return;
-    if (transmitting()) return;
+    if (transmitting()) {
+      // Valid NEC/raw frames are at most 200ms. A failed timer must not keep
+      // HELLO/status and audio behind the IR-idle gate indefinitely. Cancel
+      // the entire queue; do not retry a prop command or restart the scene.
+      if (static_cast<uint32_t>(now - frameAt) >= 500) { stop(); timedOut = true; }
+      return;
+    }
     if (gapPending && due(now, nextAt)) gapPending = false;
     if (wasSending) {
       wasSending = false;
@@ -133,7 +141,7 @@ class IrEngine {
       if (!repeats) { job = false; if (mode == 4) mode = 0; }
     }
     if (!job && queued) { load(queue[head]); head = (head + 1) & 7; --queued; job = true; if (!gapPending) nextAt = now; }
-    if (job && due(now, nextAt) && transportIdle && sonarIdle) { gapPending = false; irDriver::send(pulses, length); wasSending = true; }
+    if (job && due(now, nextAt) && transportIdle && sonarIdle) { gapPending = false; frameAt = now; irDriver::send(pulses, length); wasSending = true; }
   }
 };
 }

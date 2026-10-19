@@ -227,6 +227,24 @@ static void testIrCommands(const char* emptyScene) {
   Serial.text.clear(); fakeMillis += 11000; loop(); assert(Serial.text.empty()); // No stale capture after cancel.
   assert(!memcmp(saved, EEPROM.bytes, sizeof(saved))); // Training/testing is entirely in RAM.
 }
+static void testIrTimeoutReleasesReports(const char* emptyScene) {
+  loadIrFixture(emptyScene);
+  send("IRBEGIN 0 0 1 100 3125149440"); send("IRPLAY");
+  for (uint32_t i = 0; i < 1000 && !ir.transmitting(); ++i) { ++fakeMillis; loop(); }
+  assert(ir.transmitting() && !engine.running && !outputMask);
+  const uint32_t started = fakeMillis;
+  Serial.text.clear(); send("HELLO"); send("STATUS");
+  assert(pendingReports == 3 && Serial.text.empty());
+  fakeMillis = started + 499; loop(); assert(ir.transmitting() && Serial.text.empty());
+  fakeMillis = started + 500; loop();
+  assert(!ir.transmitting() && !ir.busy() && !engine.running && !outputMask);
+  assert(Serial.text.find("IR transmission timed out") != std::string::npos);
+  loop(); assert(pendingReports == 0);
+  assert(Serial.text.find("\"type\":\"hello\"") != std::string::npos);
+  assert(Serial.text.find("\"type\":\"status\"") != std::string::npos);
+  Serial.text.clear(); fakeMillis += 5000; loop();
+  assert(!ir.transmitting() && !engine.running && !outputMask && Serial.text.empty());
+}
 static void outputFixture() {
   stop(); memset(EEPROM.bytes, 0, sizeof(EEPROM.bytes));
   uint8_t* b = EEPROM.bytes; memcpy(b, "CPC2", 4); word(4, 52);
@@ -432,7 +450,7 @@ static void testParallelControllerAndAudio(const char* path) {
   send("STATUS");
   assert(Serial.text.find("\"activeChildren\":8,\"coolingChildren\":0") != std::string::npos);
   assert(Serial.text.find("\"parallelChildren\":true") != std::string::npos);
-  assert(Serial.text.find("\"firmware\":\"0.7.2\"") != std::string::npos);
+  assert(Serial.text.find("\"firmware\":\"0.7.3\"") != std::string::npos);
   controllerAdvance(5100); send("TRIGGER 2"); controllerAdvance(5200); assert(outputMask == 7);
   controllerAdvance(5249); assert(outputMask == 7);
   controllerAdvance(5250); assert(outputMask == 5 && pins[9] == LOW);
@@ -512,7 +530,7 @@ static void testManualAdvanceWithIndependentBeam(const char* path) {
 }
 int main(int argc, char** argv) {
   testOrderedActionTimestamps(); testCommandsAndResetBaseline(); testResidentFadeTimestamp();
-  if (argc > 1) { testIrCommands(argv[1]); testIrCompletionTimestamps(argv[1]); }
+  if (argc > 1) { testIrCommands(argv[1]); testIrCompletionTimestamps(argv[1]); testIrTimeoutReleasesReports(argv[1]); }
   testOutputTestMode(); testCpc2UploadCommit();
   testFeedbackEchoScheduling(); testSonarWaitsForAudioPacket(); testDeferredReports();
   testAudioEndControllerPriority();

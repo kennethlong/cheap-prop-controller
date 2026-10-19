@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include "gpio.hpp"
 #if defined(ARDUINO)
 #include <avr/interrupt.h>
 #endif
@@ -27,7 +28,7 @@ static inline void unlock(uint8_t saved) {
 }
 inline void off() {
 #if defined(ARDUINO)
-  if (configured) { TIMSK1 = 0; TCCR1A = 0; TCCR1B = 0; digitalWrite(txPin, LOW); }
+  if (configured) { TIMSK1 = 0; TCCR1A = 0; TCCR1B = 0; gpio::write(txPin, LOW); }
 #endif
   transmitting = false;
 }
@@ -48,7 +49,7 @@ inline void phase() {
 #endif
   } else {
 #if defined(ARDUINO)
-    TCCR1A = 0; TCCR1B = 0; digitalWrite(txPin, LOW); TCNT1 = 0;
+    TCCR1A = 0; TCCR1B = 0; gpio::write(txPin, LOW); TCNT1 = 0;
     OCR1A = static_cast<uint16_t>(ticks) * 100U - 1; // F_CPU/8, 0.5us ticks.
     TIFR1 = _BV(TOV1) | _BV(OCF1A); TIMSK1 = _BV(OCIE1A);
     TCCR1B = _BV(WGM12) | _BV(CS11);
@@ -61,7 +62,7 @@ inline void cancel() { const uint8_t saved = lock(); off(); unlock(saved); }
 inline void begin(uint8_t pin) {
   txPin = pin; configured = true;
 #if defined(ARDUINO)
-  digitalWrite(txPin, LOW); pinMode(txPin, OUTPUT);
+  gpio::write(txPin, LOW); pinMode(txPin, OUTPUT);
 #endif
   cancel();
 }
@@ -112,7 +113,7 @@ struct Capture {
 };
 static Capture capture;
 #if defined(ARDUINO)
-inline void receiveEdge() { capture.edge(digitalRead(2) != LOW, micros()); }
+inline void receiveEdge() { capture.edge(gpio::read(2) != LOW, micros()); }
 inline void armReceiver(uint8_t* buffer) { capture.arm(buffer, micros()); attachInterrupt(digitalPinToInterrupt(2), receiveEdge, CHANGE); }
 inline void stopReceiver() { detachInterrupt(digitalPinToInterrupt(2)); capture.cancel(); }
 #else

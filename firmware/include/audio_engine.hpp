@@ -1,4 +1,5 @@
 #pragma once
+#include "gpio.hpp"
 #include <Arduino.h>
 #include "scene_image.hpp"
 #include "timer_uart.hpp"
@@ -217,7 +218,7 @@ class AudioEngine {
       HardwareSerial* port = i == 0 ? &Serial1 : i == 1 ? &Serial2 : &Serial3;
       port->begin(9600);
 #else
-      digitalWrite(p.tx, HIGH); pinMode(p.tx, OUTPUT);
+      gpio::write(p.tx, HIGH); pinMode(p.tx, OUTPUT);
       pinMode(image->b(address + 2), INPUT);
 #endif
     }

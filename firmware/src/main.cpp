@@ -62,7 +62,7 @@ bool busyInput(uint8_t index) {
   if (pin == 20 || pin == 21) high = analogRead(pin) >= 512;
   else
 #endif
-  high = digitalRead(pin) != LOW;
+  high = cpc::gpio::read(pin) != LOW;
   return high ^ !(config & 128);
 }
 const __FlashStringHelper* feedbackName(uint8_t value) {
@@ -79,7 +79,7 @@ void status(bool hello) {
   const uint32_t now = millis();
   engine.updateChildren(now);
   Serial.print(F("{\"type\":\"")); Serial.print(hello ? F("hello") : F("status"));
-  Serial.print(F("\",\"protocol\":1,\"firmware\":\"0.7.2\",\"board\":\"")); Serial.print(boardName());
+  Serial.print(F("\",\"protocol\":1,\"firmware\":\"0.7.3\",\"board\":\"")); Serial.print(boardName());
   Serial.print(F("\",\"capacity\":")); Serial.print(EEPROM.length());
   Serial.print(F(",\"valid\":")); Serial.print(validScene ? F("true") : F("false"));
   Serial.print(F(",\"running\":")); Serial.print(engine.running ? F("true") : F("false"));
@@ -122,7 +122,7 @@ void writeOutputs(uint32_t mask, bool force = false) {
     const uint32_t bit = static_cast<uint32_t>(1) << i;
     if (force || ((mask ^ outputMask) & bit)) {
       const uint16_t p = image.output(i);
-      digitalWrite(image.b(p), static_cast<bool>(mask & bit) ^ static_cast<bool>(image.b(p + 1) & 1));
+      cpc::gpio::write(image.b(p), static_cast<bool>(mask & bit) ^ static_cast<bool>(image.b(p + 1) & 1));
     }
   }
   outputMask = mask;
@@ -130,21 +130,21 @@ void writeOutputs(uint32_t mask, bool force = false) {
 void stop() {
   testingOutputs = false;
   engine.stop(); writeOutputs(0, true); audio.stop(millis()); ir.stop();
-  if (validScene && sonarPhase == 1) digitalWrite(image.b(image.trigger(sonarIndex) + 1), LOW);
+  if (validScene && sonarPhase == 1) cpc::gpio::write(image.b(image.trigger(sonarIndex) + 1), LOW);
   sonarPhase = 0; changedSensor = 255;
 }
 void expireOutputTest(uint32_t now) { if (testingOutputs && static_cast<uint32_t>(now - testAt) >= 1500) stop(); }
 void resetZones() {
   changedSensor = 255;
   for (uint8_t i = 0; i < cpc::MaxTriggers; ++i) zones[i].reset();
-  if (validScene && sonarPhase == 1) digitalWrite(image.b(image.trigger(sonarIndex) + 1), LOW);
+  if (validScene && sonarPhase == 1) cpc::gpio::write(image.b(image.trigger(sonarIndex) + 1), LOW);
   sonarPhase = 0; sonarIndex = 0; sonarNext = micros();
 }
 void resetInputBaselines(uint32_t now) {
   for (uint8_t i = 0; i < image.b(10); ++i) {
     const uint16_t p = image.trigger(i);
     if (image.b(p) >= 3) continue;
-    sensorActive[i] = image.b(p) == 2 || (static_cast<bool>(digitalRead(image.b(p + 1))) ^ static_cast<bool>(image.b(p + 3) & 1));
+    sensorActive[i] = image.b(p) == 2 || (static_cast<bool>(cpc::gpio::read(image.b(p + 1))) ^ static_cast<bool>(image.b(p + 3) & 1));
     inputs[i].reset(sensorActive[i], now);
   }
 }
@@ -156,20 +156,20 @@ void setupScene() {
   for (uint8_t i = 0; i < image.zoneCount(); ++i) zoneSensorMask |= 1 << image.b(image.zone(i));
   for (uint8_t i = 0; i < image.b(9); ++i) {
     const uint16_t p = image.output(i);
-    digitalWrite(image.b(p), image.b(p + 1) & 1 ? HIGH : LOW);
+    cpc::gpio::write(image.b(p), image.b(p + 1) & 1 ? HIGH : LOW);
     pinMode(image.b(p), OUTPUT);
   }
   for (uint8_t i = 0; i < image.b(10); ++i) {
     const uint16_t p = image.trigger(i);
     if (image.b(p) >= 3) continue;
     if (image.b(p) == 2) {
-      digitalWrite(image.b(p + 1), LOW); pinMode(image.b(p + 1), OUTPUT);
+      cpc::gpio::write(image.b(p + 1), LOW); pinMode(image.b(p + 1), OUTPUT);
       pinMode(image.b(p + 2), INPUT);
       sensorActive[i] = true; // unarmed until first inactive sensor reading
       inputs[i].reset(true, now);
     } else {
       pinMode(image.b(p + 1), image.b(p + 3) & 2 ? INPUT_PULLUP : INPUT);
-      sensorActive[i] = static_cast<bool>(digitalRead(image.b(p + 1))) ^ static_cast<bool>(image.b(p + 3) & 1);
+      sensorActive[i] = static_cast<bool>(cpc::gpio::read(image.b(p + 1))) ^ static_cast<bool>(image.b(p + 3) & 1);
       inputs[i].reset(sensorActive[i], now);
     }
   }
@@ -214,17 +214,17 @@ void updateSonar() {
       sonarIndex = (sonarIndex + 1) % image.b(10);
     }
     if (!found) { sonarNext = now + 60000UL; return; }
-    digitalWrite(image.b(image.trigger(sonarIndex) + 1), HIGH);
+    cpc::gpio::write(image.b(image.trigger(sonarIndex) + 1), HIGH);
     sonarAt = now; sonarPhase = 1; return;
   }
   const uint16_t p = image.trigger(sonarIndex);
   if (sonarPhase == 1 && static_cast<uint32_t>(now - sonarAt) >= 10) {
-    digitalWrite(image.b(p + 1), LOW); sonarAt = now; sonarPhase = 2;
+    cpc::gpio::write(image.b(p + 1), LOW); sonarAt = now; sonarPhase = 2;
   } else if (sonarPhase == 2) {
-    if (digitalRead(image.b(p + 2))) { sonarAt = now; sonarPhase = 3; }
+    if (cpc::gpio::read(image.b(p + 2))) { sonarAt = now; sonarPhase = 3; }
     else if (static_cast<uint32_t>(now - sonarAt) > 30000UL) sonarMeasurement(false, 0);
   } else if (sonarPhase == 3) {
-    if (!digitalRead(image.b(p + 2))) sonarMeasurement(true, now - sonarAt);
+    if (!cpc::gpio::read(image.b(p + 2))) sonarMeasurement(true, now - sonarAt);
     else if (static_cast<uint32_t>(now - sonarAt) > 30000UL) sonarMeasurement(false, 0);
   }
 }
@@ -235,7 +235,7 @@ uint8_t readTriggerEdges(uint32_t now, uint8_t& releases) {
     const uint16_t p = image.trigger(i);
     if (image.b(p) >= 3 || (zoneSensorMask & (1 << i))) continue;
     if (image.b(p) != 2)
-      sensorActive[i] = static_cast<bool>(digitalRead(image.b(p + 1))) ^ static_cast<bool>(image.b(p + 3) & 1);
+      sensorActive[i] = static_cast<bool>(cpc::gpio::read(image.b(p + 1))) ^ static_cast<bool>(image.b(p + 3) & 1);
     const uint8_t edge = inputs[i].updateEdges(sensorActive[i], now, image.b(p + 7) * 50U);
     if (edge & 1) edges |= 1 << i;
     if (edge & 2) releases |= 1 << i;
@@ -444,5 +444,6 @@ void loop() {
     Serial.println(F("]}"));
   } else if (capture) error(capture == 4 ? F("IR learning timed out; press the remote button once") : capture == 3 ? F("IR capture overflow; command is too long") : F("IR capture invalid or repeat-only; press once again"));
   if (ir.takeOverflow()) error(F("IR command queue full; space commands farther apart"));
+  if (ir.takeTimeout()) error(F("IR transmission timed out; pending IR commands cancelled"));
   if (beginPending && audio.stopped()) { beginPending = false; ack(F("BEGIN")); }
 }

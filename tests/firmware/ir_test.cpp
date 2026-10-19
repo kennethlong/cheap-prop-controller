@@ -109,4 +109,19 @@ static void capture() {
   assert(!ir.pollLearn(100, 100000, true) && cpc::irDriver::capture.active);
   assert(ir.pollLearn(10100, 10100000, true) == 4 && !ir.learning()); ir.stop();
 }
-int main() { validation(); replay(); staging(); capture(); puts("IR host tests passed: strict v2 validation/pin collisions, NEC/raw envelope, FIFO/gaps, timed loops, state/STOP cancellation, staged RAM tests, bounded capture/noise/repeats/timeout."); }
+static void transmissionTimeout() {
+  fixture(); cpc::IrEngine ir; ir.begin(&image);
+  const uint32_t started = 0xffffff00UL;
+  assert(ir.stage(0, 0, 1, 50, 0xba45ff00UL) && ir.play(started));
+  ir.update(started, true, true); assert(ir.transmitting());
+  // Model an AVR timer that never delivers the rest of a frame. Wraparound
+  // and repeated scheduler calls cannot trigger a retry or retain busy state.
+  ir.update(started + 499U, true, true); assert(ir.transmitting() && !ir.takeTimeout());
+  ir.update(started + 500U, true, true);
+  assert(!ir.transmitting() && !ir.busy() && ir.takeTimeout() && !ir.takeTimeout());
+  ir.update(started + 1000U, true, true); assert(!ir.transmitting() && !ir.busy());
+  assert(ir.stage(0, 0, 1, 50, 0xb847ff00UL) && ir.play(2000));
+  ir.update(2000, true, true); finishFrame(); ir.update(2200, true, true);
+  assert(!ir.takeTimeout()); ir.update(2250, true, true); assert(!ir.busy());
+}
+int main() { validation(); replay(); staging(); capture(); transmissionTimeout(); puts("IR host tests passed: strict v2 validation/pin collisions, NEC/raw envelope, FIFO/gaps, timed loops, state/STOP cancellation, staged RAM tests, bounded capture/noise/repeats/timeout and stuck-transmitter recovery."); }
